@@ -1,0 +1,38 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.dll
+*.exe
+*.pdb
+*.nupkg
+*.snupkg
+
+## IDE
+.vs/
+.vscode/
+*.sln.docstates
+.idea/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild/
+
+## NuGet
+packages/
+*.nupkg
+project.lock.json
+project.fragment.lock.json
+
+## Test results
+TestResults/
+coverage/
+
+## OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>L402Requests</RootNamespace>
+    <AssemblyName>L402Requests</AssemblyName>
+
+    <!-- NuGet Package Metadata -->
+    <PackageId>L402Requests</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Refined Element</Authors>
+    <Company>Refined Element</Company>
+    <Description>Auto-paying L402 HTTP client for .NET — APIs behind Lightning paywalls just work</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://docs.lightningenable.com/tools/l402-dotnet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/refined-element/l402-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>lightning;l402;bitcoin;http;payments;lsat;nostr;nwc</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Deterministic builds -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="L402Requests.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Optional: Microsoft.Extensions.Http for DI support -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+</Project>
