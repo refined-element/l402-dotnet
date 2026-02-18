@@ -6,7 +6,7 @@ namespace L402Requests.Wallets;
 /// <summary>
 /// Pay invoices via Strike REST API.
 /// Requires: STRIKE_API_KEY environment variable.
-/// Strike provides preimage support and charges no additional fees.
+/// Strike provides full preimage support and requires no infrastructure.
 /// </summary>
 public sealed class StrikeWallet : IWallet, IDisposable
 {

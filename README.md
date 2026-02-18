@@ -33,7 +33,7 @@ Set environment variables for your preferred wallet. The library auto-detects in
 | 3 | Strike | `STRIKE_API_KEY` | Yes |
 | 4 | OpenNode | `OPENNODE_API_KEY` | Limited |
 
-**Recommended:** Strike (0% fee, full preimage support, no infrastructure required).
+**Recommended:** Strike (full preimage support, no infrastructure required).
 
 ### Strike (Recommended)
 
@@ -176,6 +176,37 @@ catch (NoWalletException)
 | `NoWalletException` | No wallet env vars detected |
 | `DomainNotAllowedException` | Domain not in `AllowedDomains` |
 | `ChallengeParseException` | Malformed L402 challenge header |
+
+## Usage with AI Agents
+
+L402Requests is the consumer-side complement to the [Lightning Enable MCP Server](https://github.com/refined-element/lightning-enable-mcp). While the MCP server gives AI agents wallet tools, L402Requests lets your .NET code access paid APIs without any agent framework.
+
+### Semantic Kernel Tool
+
+```csharp
+using L402Requests;
+using Microsoft.SemanticKernel;
+
+public class PaidApiPlugin
+{
+    private readonly L402HttpClient _client = new(new L402Options { MaxSatsPerRequest = 100 });
+
+    [KernelFunction("fetch_paid_api")]
+    [Description("Fetch data from an L402-protected API. Payment is handled automatically.")]
+    public async Task<string> FetchPaidApiAsync(string url)
+    {
+        var response = await _client.GetAsync(url);
+        return await response.Content.ReadAsStringAsync();
+    }
+}
+```
+
+### Standalone
+
+```csharp
+using var client = new L402HttpClient();
+var response = await client.GetAsync("https://api.example.com/premium-data");
+```
 
 ## What is L402?
 
