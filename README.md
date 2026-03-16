@@ -181,6 +181,8 @@ catch (NoWalletException)
 
 L402Requests is the consumer-side complement to the [Lightning Enable MCP Server](https://github.com/refined-element/lightning-enable-mcp). While the MCP server gives AI agents wallet tools, L402Requests lets your .NET code access paid APIs without any agent framework.
 
+Part of [Lightning Enable](https://lightningenable.com) — infrastructure for agent commerce over Lightning. See the [full ecosystem](https://docs.lightningenable.com/getting-started/ecosystem).
+
 ### Semantic Kernel Tool
 
 ```csharp
