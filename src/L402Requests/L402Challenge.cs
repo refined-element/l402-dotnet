@@ -117,7 +117,7 @@ public sealed record L402Challenge(string Macaroon, string Invoice) : IPaymentCh
 
 /// <summary>
 /// Represents an MPP (Machine Payments Protocol) challenge parsed from a WWW-Authenticate header.
-/// Per IETF draft-ryan-httpauth-payment. Simpler than L402 — invoice + preimage only, no macaroon.
+/// Per IETF draft-ryan-httpauth-payment. Contains a lightning invoice (with optional amount and realm); no macaroon.
 /// </summary>
 public sealed record MppChallenge : IPaymentChallenge
 {

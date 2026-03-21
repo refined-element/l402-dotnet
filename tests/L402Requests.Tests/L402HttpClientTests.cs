@@ -292,7 +292,7 @@ public class L402HttpClientTests
 
     // --- MPP (Machine Payments Protocol) tests ---
 
-    private static HttpResponseMessage CreateMpp402Response(string invoice = "lnbc10u1ptest")
+    private static HttpResponseMessage CreateMpp402Response(string invoice = TestInvoice)
     {
         var response = new HttpResponseMessage(HttpStatusCode.PaymentRequired);
         response.Headers.TryAddWithoutValidation("WWW-Authenticate",
@@ -454,7 +454,8 @@ public class L402HttpClientTests
     [Fact]
     public async Task GetAsync_RetryUsesCredentialDirectly_NotCacheLookup()
     {
-        // Use a cache with size 0 to ensure cache evicts immediately
+        // Use a minimal cache (maxSize=1) to verify the retry uses the credential directly
+        // from the Put/PutMpp return value, not a second cache lookup.
         var handler = new MockHttpMessageHandler();
         handler.EnqueueResponse(CreateMpp402Response());
         handler.EnqueueResponse(Create200Response("paid"));
@@ -464,8 +465,7 @@ public class L402HttpClientTests
             .ReturnsAsync(TestPreimage);
 
         var httpClient = new HttpClient(handler);
-        // Cache with maxSize=0 would evict everything, but credential is used directly
-        var cache = new CredentialCache(maxSize: 1); // at least 1 to allow Put
+        var cache = new CredentialCache(maxSize: 1);
         var client = new L402HttpClient(httpClient, mockWallet.Object, null, cache);
 
         var response = await client.GetAsync("https://example.com/paid-resource");

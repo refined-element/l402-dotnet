@@ -172,7 +172,7 @@ public sealed class L402HttpClient : IDisposable
     /// <summary>
     /// Parse an MPP amount string (assumed to be in satoshis) as a fallback
     /// when the BOLT11 invoice encodes no amount (zero-amount invoice).
-    /// Returns null if the value is missing or not a valid integer.
+    /// Returns null if the value is missing, not a valid integer, or not a positive amount.
     /// </summary>
     internal static int? MppAmountToSats(string? amount)
     {
