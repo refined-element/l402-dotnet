@@ -81,10 +81,10 @@ public sealed class L402HttpClient : IDisposable
         if ((int)response.StatusCode != 402)
             return response;
 
-        // Parse L402 challenge
-        var challenge = L402Challenge.TryParse(response);
+        // Parse payment challenge (prefers L402, falls back to MPP)
+        var challenge = L402Challenge.TryParsePaymentChallenge(response);
         if (challenge is null)
-            return response; // 402 but not L402 — return as-is
+            return response; // 402 but not L402/MPP — return as-is
 
         // Extract amount and check budget
         var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice);
@@ -117,13 +117,23 @@ public sealed class L402HttpClient : IDisposable
             SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true);
         }
 
-        // Cache the credential
-        _cache.Put(domain, uri.AbsolutePath, challenge.Macaroon, preimage);
+        // Cache the credential (macaroon is null for MPP challenges)
+        var macaroon = (challenge as L402Challenge)?.Macaroon;
+        _cache.Put(domain, uri.AbsolutePath, macaroon, preimage);
 
-        // Retry with L402 authorization
+        // Retry with appropriate authorization header
         var retryRequest = await CloneRequestAsync(request);
         retryRequest.Headers.Remove("Authorization");
-        retryRequest.Headers.TryAddWithoutValidation("Authorization", $"L402 {challenge.Macaroon}:{preimage}");
+        if (challenge is MppChallenge)
+        {
+            retryRequest.Headers.TryAddWithoutValidation("Authorization",
+                $"Payment method=\"lightning\", preimage=\"{preimage}\"");
+        }
+        else if (challenge is L402Challenge l402)
+        {
+            retryRequest.Headers.TryAddWithoutValidation("Authorization",
+                $"L402 {l402.Macaroon}:{preimage}");
+        }
 
         return await _httpClient.SendAsync(retryRequest, ct);
     }
