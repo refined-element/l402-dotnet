@@ -91,19 +91,12 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         else
             _cache.PutMpp(domain, uri.AbsolutePath, preimage);
 
-        // Retry with appropriate authorization header
+        // Retry with appropriate authorization header (from cached credential)
         var retryRequest = await CloneRequestAsync(request);
         retryRequest.Headers.Remove("Authorization");
-        if (challenge is MppChallenge)
-        {
-            retryRequest.Headers.TryAddWithoutValidation("Authorization",
-                $"Payment method=\"lightning\", preimage=\"{preimage}\"");
-        }
-        else if (challenge is L402Challenge l402)
-        {
-            retryRequest.Headers.TryAddWithoutValidation("Authorization",
-                $"L402 {l402.Macaroon}:{preimage}");
-        }
+        var cachedRetry = _cache.Get(domain, uri.AbsolutePath);
+        if (cachedRetry is not null)
+            retryRequest.Headers.TryAddWithoutValidation("Authorization", cachedRetry.AuthorizationHeader);
 
         return await base.SendAsync(retryRequest, ct);
     }

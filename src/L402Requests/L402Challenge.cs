@@ -131,7 +131,7 @@ public sealed record MppChallenge : IPaymentChallenge
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex MethodPattern = new(
-        @"(?:^|[\s,])method=""?(?<value>lightning)""?",
+        @"(?:^|[\s,])method=""?(?<value>lightning)""?(?=[\s,]|$)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex InvoicePattern = new(

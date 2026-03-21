@@ -110,4 +110,21 @@ public class MppChallengeTests
         var result = MppChallenge.Parse(header);
         result.Should().BeNull();
     }
+
+    [Fact]
+    public void Parse_MethodPrefixLightningFast_ReturnsNull()
+    {
+        // "lightningfast" is not "lightning" — method boundary must be enforced
+        var header = "Payment method=\"lightningfast\", invoice=\"lnbc100n1pjtest\"";
+        var result = MppChallenge.Parse(header);
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public void Parse_MethodPrefixLightningFast_Unquoted_ReturnsNull()
+    {
+        var header = "Payment method=lightningfast, invoice=lnbc100n1pjtest";
+        var result = MppChallenge.Parse(header);
+        result.Should().BeNull();
+    }
 }
