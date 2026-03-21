@@ -59,9 +59,18 @@ public sealed class CredentialCache
     }
 
     /// <summary>
-    /// Store a credential in the cache.
+    /// Store an L402 credential (with macaroon) in the cache. Backward-compatible overload.
     /// </summary>
-    public L402Credential Put(string domain, string path, string? macaroon, string preimage, DateTimeOffset? expiresAt = null)
+    public L402Credential Put(string domain, string path, string macaroon, string preimage, DateTimeOffset? expiresAt = null)
+        => PutInternal(domain, path, macaroon, preimage, expiresAt);
+
+    /// <summary>
+    /// Store a credential in the cache. Macaroon may be null for MPP (preimage-only) credentials.
+    /// </summary>
+    public L402Credential PutMpp(string domain, string path, string preimage, DateTimeOffset? expiresAt = null)
+        => PutInternal(domain, path, null, preimage, expiresAt);
+
+    private L402Credential PutInternal(string domain, string path, string? macaroon, string preimage, DateTimeOffset? expiresAt = null)
     {
         var key = CacheKey(domain, path);
 

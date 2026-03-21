@@ -85,9 +85,11 @@ public sealed class L402DelegatingHandler : DelegatingHandler
             SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true);
         }
 
-        // Cache the credential (macaroon is null for MPP challenges)
-        var macaroon = (challenge as L402Challenge)?.Macaroon;
-        _cache.Put(domain, uri.AbsolutePath, macaroon, preimage);
+        // Cache the credential
+        if (challenge is L402Challenge l402Cached)
+            _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage);
+        else
+            _cache.PutMpp(domain, uri.AbsolutePath, preimage);
 
         // Retry with appropriate authorization header
         var retryRequest = await CloneRequestAsync(request);

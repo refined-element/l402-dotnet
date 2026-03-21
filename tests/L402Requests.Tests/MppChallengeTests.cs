@@ -70,4 +70,44 @@ public class MppChallengeTests
         IPaymentChallenge paymentChallenge = challenge;
         paymentChallenge.Invoice.Should().Be("lnbc100n1pjtest");
     }
+
+    [Fact]
+    public void Parse_InvoiceBeforeMethod_Works()
+    {
+        // Parameters in reverse order: invoice before method
+        var header = "Payment invoice=\"lnbc100n1pjtest\", method=\"lightning\"";
+        var result = MppChallenge.Parse(header);
+        result.Should().NotBeNull();
+        result!.Invoice.Should().Be("lnbc100n1pjtest");
+    }
+
+    [Fact]
+    public void Parse_AnyParameterOrder_Works()
+    {
+        // amount, invoice, realm, method — all out of typical order
+        var header = "Payment amount=\"500\", invoice=\"lnbc500n1pjtest\", realm=\"api.test.com\", method=\"lightning\"";
+        var result = MppChallenge.Parse(header);
+        result.Should().NotBeNull();
+        result!.Invoice.Should().Be("lnbc500n1pjtest");
+        result.Amount.Should().Be("500");
+        result.Realm.Should().Be("api.test.com");
+    }
+
+    [Fact]
+    public void Parse_UnquotedValues_Works()
+    {
+        var header = "Payment method=lightning, invoice=lnbc100n1pjtest";
+        var result = MppChallenge.Parse(header);
+        result.Should().NotBeNull();
+        result!.Invoice.Should().Be("lnbc100n1pjtest");
+    }
+
+    [Fact]
+    public void Parse_NotAnchoredToPaymentScheme_ReturnsNull()
+    {
+        // Header does not start with "Payment" — should not match
+        var header = "Bearer realm=\"test\", Payment method=\"lightning\", invoice=\"lnbc100n1pjtest\"";
+        var result = MppChallenge.Parse(header);
+        result.Should().BeNull();
+    }
 }

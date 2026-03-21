@@ -125,36 +125,68 @@ public sealed record MppChallenge : IPaymentChallenge
     public string? Amount { get; init; }
     public string? Realm { get; init; }
 
-    private static readonly Regex PaymentPattern = new(
-        @"Payment\s+.*?method=""lightning"".*?invoice=""(?<invoice>[^""]+)""",
+    // Order-independent parameter patterns supporting both quoted and unquoted values.
+    private static readonly Regex SchemePattern = new(
+        @"^Payment\s+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex MethodPattern = new(
+        @"(?:^|[\s,])method=""?(?<value>lightning)""?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex InvoicePattern = new(
+        @"(?:^|[\s,])invoice=""?(?<value>[^\s,""]*)""?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex AmountPattern = new(
+        @"(?:^|[\s,])amount=""?(?<value>[^\s,""]*)""?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex RealmPattern = new(
+        @"(?:^|[\s,])realm=""?(?<value>[^\s,""]*)""?",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
     /// Try to parse an MPP challenge from a WWW-Authenticate header value.
     /// Returns null if the header is not a valid MPP Payment challenge with method="lightning".
+    /// Parameters are parsed in any order; both quoted and unquoted values are accepted.
     /// </summary>
     public static MppChallenge? Parse(string? header)
     {
         if (string.IsNullOrWhiteSpace(header))
             return null;
 
-        var match = PaymentPattern.Match(header);
-        if (!match.Success)
+        // The header must start with the "Payment" scheme
+        if (!SchemePattern.IsMatch(header))
             return null;
 
-        var invoice = match.Groups["invoice"].Value;
+        // Extract the parameter portion (everything after "Payment ")
+        var paramStr = SchemePattern.Replace(header, "", 1);
+
+        // method="lightning" must be present (order-independent)
+        if (!MethodPattern.IsMatch(paramStr))
+            return null;
+
+        // invoice is required (order-independent)
+        var invoiceMatch = InvoicePattern.Match(paramStr);
+        if (!invoiceMatch.Success)
+            return null;
+
+        var invoice = invoiceMatch.Groups["value"].Value;
         if (string.IsNullOrEmpty(invoice))
             return null;
 
-        // Extract optional fields
-        var amountMatch = Regex.Match(header, @"amount=""(?<amount>[^""]+)""", RegexOptions.IgnoreCase);
-        var realmMatch = Regex.Match(header, @"realm=""(?<realm>[^""]+)""", RegexOptions.IgnoreCase);
+        // Extract optional fields (order-independent)
+        var amountMatch = AmountPattern.Match(paramStr);
+        var realmMatch = RealmPattern.Match(paramStr);
 
         return new MppChallenge
         {
             Invoice = invoice,
-            Amount = amountMatch.Success ? amountMatch.Groups["amount"].Value : null,
-            Realm = realmMatch.Success ? realmMatch.Groups["realm"].Value : null
+            Amount = amountMatch.Success && !string.IsNullOrEmpty(amountMatch.Groups["value"].Value)
+                ? amountMatch.Groups["value"].Value : null,
+            Realm = realmMatch.Success && !string.IsNullOrEmpty(realmMatch.Groups["value"].Value)
+                ? realmMatch.Groups["value"].Value : null
         };
     }
 }
