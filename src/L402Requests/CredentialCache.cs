@@ -1,17 +1,19 @@
 namespace L402Requests;
 
 /// <summary>
-/// A cached L402 credential (macaroon + preimage).
+/// A cached payment credential (L402 macaroon + preimage, or MPP preimage only).
 /// </summary>
 public sealed record L402Credential(
-    string Macaroon,
+    string? Macaroon,
     string Preimage,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ExpiresAt)
 {
     public bool IsExpired => ExpiresAt.HasValue && DateTimeOffset.UtcNow >= ExpiresAt.Value;
 
-    public string AuthorizationHeader => $"L402 {Macaroon}:{Preimage}";
+    public string AuthorizationHeader => Macaroon is null
+        ? $"Payment method=\"lightning\", preimage=\"{Preimage}\""
+        : $"L402 {Macaroon}:{Preimage}";
 }
 
 /// <summary>
@@ -57,9 +59,18 @@ public sealed class CredentialCache
     }
 
     /// <summary>
-    /// Store a credential in the cache.
+    /// Store an L402 credential (with macaroon) in the cache. Backward-compatible overload.
     /// </summary>
     public L402Credential Put(string domain, string path, string macaroon, string preimage, DateTimeOffset? expiresAt = null)
+        => PutInternal(domain, path, macaroon, preimage, expiresAt);
+
+    /// <summary>
+    /// Store a credential in the cache. Macaroon may be null for MPP (preimage-only) credentials.
+    /// </summary>
+    public L402Credential PutMpp(string domain, string path, string preimage, DateTimeOffset? expiresAt = null)
+        => PutInternal(domain, path, null, preimage, expiresAt);
+
+    private L402Credential PutInternal(string domain, string path, string? macaroon, string preimage, DateTimeOffset? expiresAt = null)
     {
         var key = CacheKey(domain, path);
 

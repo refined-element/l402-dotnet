@@ -49,13 +49,15 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         if ((int)response.StatusCode != 402)
             return response;
 
-        // Parse L402 challenge
-        var challenge = L402Challenge.TryParse(response);
+        // Parse payment challenge (prefers L402, falls back to MPP)
+        var challenge = L402Challenge.TryParsePaymentChallenge(response);
         if (challenge is null)
             return response;
 
-        // Extract amount and check budget
-        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice);
+        // Extract amount and check budget.
+        // Prefer the BOLT11-encoded amount; fall back to MPP amount parameter for zero-amount invoices.
+        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice)
+            ?? (challenge is MppChallenge mppForBudget ? L402HttpClient.MppAmountToSats(mppForBudget.Amount) : null);
         var domain = uri.Host;
 
         if (_budget is not null && amountSats.HasValue)
@@ -85,13 +87,18 @@ public sealed class L402DelegatingHandler : DelegatingHandler
             SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true);
         }
 
-        // Cache the credential
-        _cache.Put(domain, uri.AbsolutePath, challenge.Macaroon, preimage);
+        // Cache the credential and use the returned credential directly for the retry header.
+        // This avoids a second cache lookup that could fail if the cache evicts immediately.
+        L402Credential credential;
+        if (challenge is L402Challenge l402Cached)
+            credential = _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage);
+        else
+            credential = _cache.PutMpp(domain, uri.AbsolutePath, preimage);
 
-        // Retry with L402 authorization
+        // Retry with authorization header constructed directly from the credential
         var retryRequest = await CloneRequestAsync(request);
         retryRequest.Headers.Remove("Authorization");
-        retryRequest.Headers.TryAddWithoutValidation("Authorization", $"L402 {challenge.Macaroon}:{preimage}");
+        retryRequest.Headers.TryAddWithoutValidation("Authorization", credential.AuthorizationHeader);
 
         return await base.SendAsync(retryRequest, ct);
     }

@@ -125,6 +125,27 @@ public class CredentialCacheTests
     }
 
     [Fact]
+    public void AuthorizationHeader_NullMacaroon_UsesPaymentFormat()
+    {
+        var cache = new CredentialCache();
+        var cred = cache.PutMpp("example.com", "/api", "pre456");
+
+        cred.AuthorizationHeader.Should().Be("Payment method=\"lightning\", preimage=\"pre456\"");
+    }
+
+    [Fact]
+    public void PutMpp_CachesAndRetrieves()
+    {
+        var cache = new CredentialCache();
+        cache.PutMpp("example.com", "/api/v1/data", "pre456");
+
+        var cred = cache.Get("example.com", "/api/v1/data");
+        cred.Should().NotBeNull();
+        cred!.Macaroon.Should().BeNull();
+        cred.Preimage.Should().Be("pre456");
+    }
+
+    [Fact]
     public void Put_UpdatesExistingEntry()
     {
         var cache = new CredentialCache();
