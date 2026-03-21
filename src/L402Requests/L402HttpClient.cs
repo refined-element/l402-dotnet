@@ -86,8 +86,10 @@ public sealed class L402HttpClient : IDisposable
         if (challenge is null)
             return response; // 402 but not L402/MPP — return as-is
 
-        // Extract amount and check budget
-        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice);
+        // Extract amount and check budget.
+        // Prefer the BOLT11-encoded amount; fall back to MPP amount parameter for zero-amount invoices.
+        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice)
+            ?? (challenge is MppChallenge mppForBudget ? MppAmountToSats(mppForBudget.Amount) : null);
         var domain = uri.Host;
 
         if (_budget is not null && amountSats.HasValue)
@@ -117,18 +119,18 @@ public sealed class L402HttpClient : IDisposable
             SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true);
         }
 
-        // Cache the credential
+        // Cache the credential and use the returned credential directly for the retry header.
+        // This avoids a second cache lookup that could fail if the cache evicts immediately.
+        L402Credential credential;
         if (challenge is L402Challenge l402Cached)
-            _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage);
+            credential = _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage);
         else
-            _cache.PutMpp(domain, uri.AbsolutePath, preimage);
+            credential = _cache.PutMpp(domain, uri.AbsolutePath, preimage);
 
-        // Retry with appropriate authorization header (from cached credential)
+        // Retry with authorization header constructed directly from the credential
         var retryRequest = await CloneRequestAsync(request);
         retryRequest.Headers.Remove("Authorization");
-        var cachedRetry = _cache.Get(domain, uri.AbsolutePath);
-        if (cachedRetry is not null)
-            retryRequest.Headers.TryAddWithoutValidation("Authorization", cachedRetry.AuthorizationHeader);
+        retryRequest.Headers.TryAddWithoutValidation("Authorization", credential.AuthorizationHeader);
 
         return await _httpClient.SendAsync(retryRequest, ct);
     }
@@ -165,6 +167,18 @@ public sealed class L402HttpClient : IDisposable
     {
         _wallet ??= WalletDetector.DetectWallet();
         return _wallet;
+    }
+
+    /// <summary>
+    /// Parse an MPP amount string (assumed to be in satoshis) as a fallback
+    /// when the BOLT11 invoice encodes no amount (zero-amount invoice).
+    /// Returns null if the value is missing or not a valid integer.
+    /// </summary>
+    internal static int? MppAmountToSats(string? amount)
+    {
+        if (string.IsNullOrWhiteSpace(amount))
+            return null;
+        return int.TryParse(amount, out var sats) && sats > 0 ? sats : null;
     }
 
     private static async Task<HttpRequestMessage> CloneRequestAsync(HttpRequestMessage original)
