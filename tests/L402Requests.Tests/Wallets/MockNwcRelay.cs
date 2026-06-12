@@ -23,7 +23,6 @@ internal sealed class MockNwcRelay : IAsyncDisposable
 {
     private readonly HttpListener _listener;
     private readonly ECPrivKey _walletPriv;
-    private readonly byte[] _walletPubBytes;
     private readonly string _walletPubkeyHex;
     private readonly string _preimageHex;
     private readonly CancellationTokenSource _cts = new();
@@ -31,11 +30,17 @@ internal sealed class MockNwcRelay : IAsyncDisposable
 
     public string Url { get; }
 
+    /// <summary>
+    /// When set, the kind-23195 response EVENT is published under THIS subscription id
+    /// instead of the one the client opened with its REQ. Lets a test prove the client
+    /// ignores events delivered for a different subscription (msgArray[1] != subId).
+    /// </summary>
+    public string? SubIdOverride { get; set; }
+
     public MockNwcRelay(ECPrivKey walletPriv, string walletPubkeyHex, string preimageHex)
     {
         _walletPriv = walletPriv;
         _walletPubkeyHex = walletPubkeyHex;
-        _walletPubBytes = Convert.FromHexString(walletPubkeyHex);
         _preimageHex = preimageHex;
 
         var port = GetFreePort();
@@ -170,7 +175,8 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                         ["sig"] = Convert.ToHexString(sig!.ToBytes()).ToLowerInvariant()
                     };
 
-                    var outMsg = new JsonArray { "EVENT", subId, JsonNode.Parse(respEvent.ToJsonString()) };
+                    var publishSubId = SubIdOverride ?? subId;
+                    var outMsg = new JsonArray { "EVENT", publishSubId, JsonNode.Parse(respEvent.ToJsonString()) };
                     await SendAsync(ws, outMsg.ToJsonString());
                 }
             }

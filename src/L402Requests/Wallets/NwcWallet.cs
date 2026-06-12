@@ -20,9 +20,14 @@ namespace L402Requests.Wallets;
 /// </summary>
 public sealed class NwcWallet : IWallet
 {
-    // JSON options that don't escape special characters. Required so the Nostr event
-    // id (SHA256 over the canonical serialisation) matches what relays/wallets compute
-    // — e.g. '+' must stay '+' and not become "+".
+    // Relaxed JSON escaping for the canonical Nostr serialisation. The default
+    // System.Text.Json encoder escapes HTML-sensitive and non-ASCII characters (such as
+    // less-than, greater-than, ampersand and plus) into their backslash-u unicode escape
+    // form. UnsafeRelaxedJsonEscaping emits them as the literal character instead, which
+    // is what other Nostr implementations produce when computing the event id (SHA256
+    // over the serialised array). Any escaping difference would change the bytes hashed
+    // and yield a mismatched event id that relays/wallets reject, so this encoder must be
+    // used here.
     private static readonly JsonSerializerOptions NostrJsonOptions = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -55,7 +60,27 @@ public sealed class NwcWallet : IWallet
         if (string.IsNullOrEmpty(_walletPubkey))
             throw new ArgumentException("NWC connection string missing wallet pubkey");
 
-        _secretBytes = Convert.FromHexString(secret);
+        // Validate the wallet pubkey is well-formed hex up front. Convert.FromHexString
+        // throws FormatException for malformed input, which would otherwise bubble out of
+        // the constructor as an unexpected type — surface it as ArgumentException so the
+        // connection-string error contract is consistent (matches missing-relay/secret).
+        try
+        {
+            _ = Convert.FromHexString(_walletPubkey);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("NWC connection string wallet pubkey is not valid hex", ex);
+        }
+
+        try
+        {
+            _secretBytes = Convert.FromHexString(secret);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("NWC connection string secret is not valid hex", ex);
+        }
 
         if (!ECPrivKey.TryCreate(_secretBytes, out var privKey) || privKey is null)
             throw new ArgumentException("NWC connection string secret is not a valid secp256k1 private key");
@@ -113,6 +138,15 @@ public sealed class NwcWallet : IWallet
                 }
 
                 if (result.MessageType == WebSocketMessageType.Close) break;
+                // Nostr relay frames are UTF-8 text. Ignore Binary (or any non-Text,
+                // non-Close) frames rather than decoding them as garbage UTF-8 and
+                // feeding the JSON parser. Reset any partial buffer so a stray binary
+                // fragment can't corrupt a subsequent text message.
+                if (result.MessageType != WebSocketMessageType.Text)
+                {
+                    sb.Clear();
+                    continue;
+                }
                 sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
                 if (!result.EndOfMessage) continue;
 
@@ -125,7 +159,11 @@ public sealed class NwcWallet : IWallet
 
                 if (msgArray is null || msgArray.Count < 2) continue;
                 if (msgArray[0]?.GetValue<string>() != "EVENT") continue;
+                // Relay-message framing is ["EVENT", <subId>, <event>]. Only accept events
+                // delivered for the subscription we opened — a relay could push unrelated
+                // events on other subscriptions, which must not be mistaken for our reply.
                 if (msgArray.Count < 3) continue;
+                if (msgArray[1]?.GetValue<string>() != subId) continue;
 
                 var responseEvent = msgArray[2]?.AsObject();
                 if (responseEvent is null) continue;
@@ -570,11 +608,16 @@ public sealed class NwcWallet : IWallet
         var keyStream = new byte[64];
         uint counter = 0;
 
+        // RFC 8439 requires little-endian decoding of the key/nonce words. BitConverter
+        // is host-endianness-dependent (wrong on big-endian platforms), so decode the
+        // words explicitly little-endian for deterministic, interop-correct output.
         var keyWords = new uint[8];
-        for (int i = 0; i < 8; i++) keyWords[i] = BitConverter.ToUInt32(key, i * 4);
+        for (int i = 0; i < 8; i++)
+            keyWords[i] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(key.AsSpan(i * 4));
 
         var nonceWords = new uint[3];
-        for (int i = 0; i < 3; i++) nonceWords[i] = BitConverter.ToUInt32(nonce, i * 4);
+        for (int i = 0; i < 3; i++)
+            nonceWords[i] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(nonce.AsSpan(i * 4));
 
         for (int offset = 0; offset < input.Length; offset += 64)
         {
