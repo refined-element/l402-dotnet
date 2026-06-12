@@ -456,6 +456,36 @@ public class NwcWalletTests
             "an EVENT for a different subscription id must be ignored, so no valid reply arrives");
     }
 
+    [Fact]
+    public async Task PayInvoiceAsync_MalformedJsonResponse_DoesNotLeakJsonException()
+    {
+        // The relay replies with a correctly-signed, correctly-encrypted kind-23195 event
+        // whose decrypted content is NOT valid JSON. The receive loop's JsonDocument.Parse
+        // must not let a raw JsonException escape — it should treat the message as
+        // "not for us" and keep waiting, so the call ends as a PaymentFailedException
+        // (timeout), never a JsonException.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage)
+        {
+            MalformedJsonPayload = true
+        };
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(3));
+
+        var act = async () => await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+        (await act.Should().ThrowAsync<PaymentFailedException>(
+            "an invalid-JSON response must be skipped, not surfaced as a raw JsonException"))
+            .Which.Should().NotBeOfType<JsonException>();
+    }
+
     #endregion
 
     #region Connection-string validation (consistent ArgumentException contract)
@@ -487,6 +517,35 @@ public class NwcWalletTests
         var act = () => new NwcWallet(connStr);
 
         act.Should().Throw<ArgumentException>().WithMessage("*secret*");
+    }
+
+    [Fact]
+    public void Constructor_WrongLengthWalletPubkey_ThrowsArgumentException()
+    {
+        // A hex-but-wrong-length wallet pubkey (60 chars = 30 bytes, NOT the required
+        // 32-byte x-only key) passes the hex check but is not a valid pubkey. Without an
+        // explicit length check it slips through construction and only fails much later
+        // (ECDH / receive timeout). Validate the length up front with a clear message.
+        var shortPubkey = new string('a', 60); // even-length hex, but 30 bytes not 32
+        var connStr =
+            "nostr+walletconnect://" + shortPubkey +
+            "?relay=wss://relay.example.com&secret=" + ValidClientSecretHex;
+
+        var act = () => new NwcWallet(connStr);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*pubkey*");
+    }
+
+    [Fact]
+    public void Constructor_MalformedConnectionString_ThrowsArgumentException()
+    {
+        // A connection string that isn't a parseable URI makes `new Uri(...)` throw
+        // UriFormatException (a FormatException, NOT an ArgumentException), which would
+        // escape the constructor as an inconsistent type. Surface it as ArgumentException
+        // to match the rest of the connection-string error contract.
+        var act = () => new NwcWallet("ht!tp://[not a valid uri");
+
+        act.Should().Throw<ArgumentException>().WithMessage("*connection string*");
     }
 
     #endregion

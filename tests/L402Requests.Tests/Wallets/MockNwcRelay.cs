@@ -37,6 +37,15 @@ internal sealed class MockNwcRelay : IAsyncDisposable
     /// </summary>
     public string? SubIdOverride { get; set; }
 
+    /// <summary>
+    /// When true, the kind-23195 response carries syntactically INVALID JSON as its
+    /// (correctly NIP-04 encrypted) content. The client decrypts it fine but the
+    /// subsequent JsonDocument.Parse would throw — letting a test prove the client treats
+    /// undecodable/invalid-JSON responses as "not for us" (continue) rather than letting a
+    /// raw JsonException escape PayInvoiceAsync.
+    /// </summary>
+    public bool MalformedJsonPayload { get; set; }
+
     public MockNwcRelay(ECPrivKey walletPriv, string walletPubkeyHex, string preimageHex)
     {
         _walletPriv = walletPriv;
@@ -146,11 +155,15 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                     }
 
                     // Build the response payload and reply as a signed kind-23195 event.
-                    var responsePayload = new JsonObject
-                    {
-                        ["result_type"] = "pay_invoice",
-                        ["result"] = new JsonObject { ["preimage"] = _preimageHex }
-                    }.ToJsonString();
+                    // When MalformedJsonPayload is set, send content that decrypts cleanly
+                    // but is NOT valid JSON, exercising the client's JsonException handling.
+                    var responsePayload = MalformedJsonPayload
+                        ? "this is not valid json {{{"
+                        : new JsonObject
+                        {
+                            ["result_type"] = "pay_invoice",
+                            ["result"] = new JsonObject { ["preimage"] = _preimageHex }
+                        }.ToJsonString();
 
                     // Encrypt for the client using the wallet privkey + client pubkey (NIP-04).
                     var encryptedResp = NwcWallet.EncryptNip04(responsePayload, clientPubBytes, _walletPriv);

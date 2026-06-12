@@ -50,7 +50,19 @@ public sealed class NwcWallet : IWallet
     {
         _timeout = timeout ?? TimeSpan.FromSeconds(30);
 
-        var uri = new Uri(connectionString);
+        // A malformed connection string makes `new Uri(...)` throw UriFormatException (a
+        // FormatException, NOT an ArgumentException). Surface it as ArgumentException so the
+        // constructor's error contract stays consistent with the missing-field validation below.
+        Uri uri;
+        try
+        {
+            uri = new Uri(connectionString);
+        }
+        catch (UriFormatException ex)
+        {
+            throw new ArgumentException("NWC connection string is not a valid URI", ex);
+        }
+
         _walletPubkey = uri.Host;
 
         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
@@ -64,14 +76,23 @@ public sealed class NwcWallet : IWallet
         // throws FormatException for malformed input, which would otherwise bubble out of
         // the constructor as an unexpected type — surface it as ArgumentException so the
         // connection-string error contract is consistent (matches missing-relay/secret).
+        byte[] walletPubkeyBytes;
         try
         {
-            _ = Convert.FromHexString(_walletPubkey);
+            walletPubkeyBytes = Convert.FromHexString(_walletPubkey);
         }
         catch (FormatException ex)
         {
             throw new ArgumentException("NWC connection string wallet pubkey is not valid hex", ex);
         }
+
+        // A wallet pubkey is a 32-byte (64 hex char) secp256k1 x-only key. An even-length
+        // hex string of the wrong size passes the hex check above but is not a valid pubkey;
+        // it would otherwise slip through construction and only fail much later (ECDH lift /
+        // receive timeout). Reject it up front with a clear message.
+        if (walletPubkeyBytes.Length != 32)
+            throw new ArgumentException(
+                $"NWC connection string wallet pubkey must be 32 bytes (64 hex chars), got {walletPubkeyBytes.Length} bytes");
 
         try
         {
@@ -201,24 +222,38 @@ public sealed class NwcWallet : IWallet
                     continue;
                 }
 
-                using var resultDoc = JsonDocument.Parse(decrypted);
-                var root = resultDoc.RootElement;
-
-                if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+                JsonDocument resultDoc;
+                try
                 {
-                    var code = error.TryGetProperty("code", out var c) ? c.ToString() : "unknown";
-                    var errorMsg = error.TryGetProperty("message", out var m) ? m.GetString() ?? "unknown error" : "unknown error";
-                    throw new PaymentFailedException($"NWC error {code}: {errorMsg}", bolt11);
+                    resultDoc = JsonDocument.Parse(decrypted);
                 }
-
-                if (root.TryGetProperty("result", out var resultObj) &&
-                    resultObj.ValueKind == JsonValueKind.Object &&
-                    resultObj.TryGetProperty("preimage", out var preimageEl))
+                catch (JsonException)
                 {
-                    var preimage = preimageEl.GetString();
-                    if (string.IsNullOrEmpty(preimage))
-                        throw new PaymentFailedException("NWC payment succeeded but no preimage returned", bolt11);
-                    return preimage;
+                    // Decrypted to something that isn't valid JSON — treat as not-for-us and
+                    // keep waiting, matching how an undecryptable message is handled above.
+                    // Never let a raw JsonException escape PayInvoiceAsync.
+                    continue;
+                }
+                using (resultDoc)
+                {
+                    var root = resultDoc.RootElement;
+
+                    if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+                    {
+                        var code = error.TryGetProperty("code", out var c) ? c.ToString() : "unknown";
+                        var errorMsg = error.TryGetProperty("message", out var m) ? m.GetString() ?? "unknown error" : "unknown error";
+                        throw new PaymentFailedException($"NWC error {code}: {errorMsg}", bolt11);
+                    }
+
+                    if (root.TryGetProperty("result", out var resultObj) &&
+                        resultObj.ValueKind == JsonValueKind.Object &&
+                        resultObj.TryGetProperty("preimage", out var preimageEl))
+                    {
+                        var preimage = preimageEl.GetString();
+                        if (string.IsNullOrEmpty(preimage))
+                            throw new PaymentFailedException("NWC payment succeeded but no preimage returned", bolt11);
+                        return preimage;
+                    }
                 }
             }
 
