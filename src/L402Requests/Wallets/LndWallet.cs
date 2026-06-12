@@ -46,8 +46,12 @@ public sealed class LndWallet : IWallet, IDisposable
         X509Certificate2? pinnedCert = null;
         if (!string.IsNullOrEmpty(tlsCertPath))
         {
+            // Load the node's TLS cert purely to pin the SERVER certificate (thumbprint
+            // comparison in ValidateServerCertificate). Do NOT add it to
+            // handler.ClientCertificates — that configures CLIENT authentication (mTLS),
+            // which is not what server-cert pinning needs. Worse, this cert has no private
+            // key, so if the server ever requests a client cert the handshake would fail.
             pinnedCert = new X509Certificate2(tlsCertPath);
-            handler.ClientCertificates.Add(pinnedCert);
         }
 
         // Only install a custom validation callback when we have something specific to do:
@@ -77,9 +81,10 @@ public sealed class LndWallet : IWallet, IDisposable
         var v = Environment.GetEnvironmentVariable("LND_INSECURE");
         if (string.IsNullOrWhiteSpace(v)) return false;
         v = v.Trim();
+        // Accepted opt-in values are exactly "1" / "true" (case-insensitive for "true"),
+        // matching the LND_INSECURE XML doc on the constructor.
         return v.Equals("1", StringComparison.Ordinal)
-            || v.Equals("true", StringComparison.OrdinalIgnoreCase)
-            || v.Equals("yes", StringComparison.OrdinalIgnoreCase);
+            || v.Equals("true", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
