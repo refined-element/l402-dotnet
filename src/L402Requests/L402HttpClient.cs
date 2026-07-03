@@ -92,6 +92,10 @@ public sealed class L402HttpClient : IDisposable
             ?? (challenge is MppChallenge mppForBudget ? MppAmountToSats(mppForBudget.Amount) : null);
         var domain = uri.Host;
 
+        // Macaroon from the parsed challenge, recorded at payment time so two-step
+        // flows can rebuild "L402 {macaroon}:{preimage}". MPP challenges have none.
+        var challengeMacaroon = challenge is L402Challenge l402Challenge ? l402Challenge.Macaroon : "";
+
         if (_budget is not null && amountSats.HasValue)
             _budget.Check(amountSats.Value, domain);
 
@@ -105,7 +109,7 @@ public sealed class L402HttpClient : IDisposable
         catch (Exception e)
         {
             if (amountSats.HasValue)
-                SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false);
+                SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
 
             if (e is L402Exception)
                 throw;
@@ -116,7 +120,7 @@ public sealed class L402HttpClient : IDisposable
         if (amountSats.HasValue)
         {
             _budget?.RecordPayment(amountSats.Value);
-            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true);
+            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
         }
 
         // Cache the credential and use the returned credential directly for the retry header.

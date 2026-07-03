@@ -136,6 +136,45 @@ Console.WriteLine($"By domain: {string.Join(", ", client.SpendingLog.ByDomain())
 Console.WriteLine(client.SpendingLog.ToJson());
 ```
 
+## Two-Step L402 Flows (Commerce)
+
+Some servers intentionally use a two-step L402 flow where payment and claim are separate endpoints. This is common for physical goods — it separates payment from fulfillment and allows the claim URL to be shared with a gift recipient.
+
+For example, the [Lightning Enable Store](https://store.lightningenable.com) returns a 402 on `POST /checkout`, and after payment you claim the order at `POST /claim` with the L402 credential.
+
+In these cases, `L402Requests` pays the invoice automatically. Retrieve the credential (macaroon + preimage) from the spending log, then make the claim request:
+
+```csharp
+// Store products cost ~48,000 sats incl. shipping — raise the hourly/daily
+// caps too, or the default 10k/hour budget rejects the purchase.
+using var client = new L402HttpClient(new L402Options
+{
+    MaxSatsPerRequest = 50000,
+    MaxSatsPerHour = 50000,
+    MaxSatsPerDay = 100000,
+});
+var checkout = await client.PostAsync(
+    "https://store.lightningenable.com/api/store/checkout",
+    JsonContent.Create(new { items = new[] { new { productId = 2, quantity = 1, size = "L", color = "Black" } } }));
+
+// Payment was made — retrieve the credential from the spending log
+var record = client.SpendingLog.Records[^1];
+Console.WriteLine($"Paid {record.AmountSats} sats");
+
+// Claim the order with the L402 credential. The order is identified by the
+// macaroon — no shipping details in this request. The response's claimUrl is
+// where the buyer enters their shipping address.
+using var http = new HttpClient();
+var claimRequest = new HttpRequestMessage(HttpMethod.Post, "https://store.lightningenable.com/api/store/claim")
+{
+    Content = JsonContent.Create(new { l402Credential = $"{record.Macaroon}:{record.Preimage}" }),
+};
+claimRequest.Headers.TryAddWithoutValidation("Authorization", $"L402 {record.Macaroon}:{record.Preimage}");
+var claim = await http.SendAsync(claimRequest);
+var claimBody = await claim.Content.ReadFromJsonAsync<JsonElement>();
+Console.WriteLine($"Share this with the recipient: {claimBody.GetProperty("claimUrl")}");
+```
+
 ## How It Works
 
 1. Your code makes an HTTP request via `L402HttpClient`

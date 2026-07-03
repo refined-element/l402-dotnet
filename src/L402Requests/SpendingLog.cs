@@ -5,13 +5,20 @@ namespace L402Requests;
 /// <summary>
 /// A single L402 payment event.
 /// </summary>
+/// <remarks>
+/// <see cref="Macaroon"/> is the macaroon from the parsed 402 challenge, recorded at
+/// payment time. Together with <see cref="Preimage"/> it forms the reusable L402
+/// credential (<c>Authorization: L402 {macaroon}:{preimage}</c>) needed by two-step
+/// pay-then-claim flows. Empty string for MPP challenges (which carry no macaroon).
+/// </remarks>
 public sealed record PaymentRecord(
     string Domain,
     string Path,
     int AmountSats,
     string Preimage,
     DateTimeOffset Timestamp,
-    bool Success);
+    bool Success,
+    string Macaroon = "");
 
 /// <summary>
 /// Records all L402 payments for introspection and auditing.
@@ -24,9 +31,9 @@ public sealed class SpendingLog
     /// <summary>
     /// Record a payment attempt.
     /// </summary>
-    public PaymentRecord Record(string domain, string path, int amountSats, string preimage, bool success = true)
+    public PaymentRecord Record(string domain, string path, int amountSats, string preimage, bool success = true, string macaroon = "")
     {
-        var record = new PaymentRecord(domain, path, amountSats, preimage, DateTimeOffset.UtcNow, success);
+        var record = new PaymentRecord(domain, path, amountSats, preimage, DateTimeOffset.UtcNow, success, macaroon);
         lock (_lock)
         {
             _records.Add(record);
