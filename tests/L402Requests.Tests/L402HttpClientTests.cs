@@ -155,6 +155,8 @@ public class L402HttpClientTests
         // Should record failed payment
         client.SpendingLog.Count.Should().Be(1);
         client.SpendingLog.Records[0].Success.Should().BeFalse();
+        // Challenge macaroon is still recorded on failure
+        client.SpendingLog.Records[0].Macaroon.Should().Be(TestMacaroon);
     }
 
     [Fact]
@@ -179,6 +181,9 @@ public class L402HttpClientTests
         client.SpendingLog.Records[0].Success.Should().BeTrue();
         client.SpendingLog.Records[0].Domain.Should().Be("example.com");
         client.SpendingLog.Records[0].Preimage.Should().Be(TestPreimage);
+        // Macaroon from the parsed 402 challenge is exposed for two-step
+        // pay-then-claim flows (Authorization: L402 {macaroon}:{preimage})
+        client.SpendingLog.Records[0].Macaroon.Should().Be(TestMacaroon);
     }
 
     [Fact]
@@ -427,6 +432,8 @@ public class L402HttpClientTests
         client.SpendingLog.Count.Should().Be(1);
         client.SpendingLog.TotalSpent().Should().Be(500);
         client.SpendingLog.Records[0].AmountSats.Should().Be(500);
+        // MPP challenges carry no macaroon — recorded as empty string
+        client.SpendingLog.Records[0].Macaroon.Should().Be("");
     }
 
     [Fact]
