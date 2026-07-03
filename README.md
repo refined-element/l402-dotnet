@@ -145,7 +145,14 @@ For example, the [Lightning Enable Store](https://store.lightningenable.com) ret
 In these cases, `L402Requests` pays the invoice automatically. Retrieve the credential (macaroon + preimage) from the spending log, then make the claim request:
 
 ```csharp
-using var client = new L402HttpClient(new L402Options { MaxSatsPerRequest = 50000 });
+// Store products cost ~48,000 sats incl. shipping — raise the hourly/daily
+// caps too, or the default 10k/hour budget rejects the purchase.
+using var client = new L402HttpClient(new L402Options
+{
+    MaxSatsPerRequest = 50000,
+    MaxSatsPerHour = 50000,
+    MaxSatsPerDay = 100000,
+});
 var checkout = await client.PostAsync(
     "https://store.lightningenable.com/api/store/checkout",
     JsonContent.Create(new { items = new[] { new { productId = 2, quantity = 1, size = "L", color = "Black" } } }));
@@ -154,14 +161,18 @@ var checkout = await client.PostAsync(
 var record = client.SpendingLog.Records[^1];
 Console.WriteLine($"Paid {record.AmountSats} sats");
 
-// Claim the order with the L402 credential
+// Claim the order with the L402 credential. The order is identified by the
+// macaroon — no shipping details in this request. The response's claimUrl is
+// where the buyer enters their shipping address.
 using var http = new HttpClient();
 var claimRequest = new HttpRequestMessage(HttpMethod.Post, "https://store.lightningenable.com/api/store/claim")
 {
-    Content = JsonContent.Create(claimDetails), // shipping details etc. — see the store's API docs
+    Content = JsonContent.Create(new { l402Credential = $"{record.Macaroon}:{record.Preimage}" }),
 };
 claimRequest.Headers.TryAddWithoutValidation("Authorization", $"L402 {record.Macaroon}:{record.Preimage}");
 var claim = await http.SendAsync(claimRequest);
+var claimBody = await claim.Content.ReadFromJsonAsync<JsonElement>();
+Console.WriteLine($"Share this with the recipient: {claimBody.GetProperty("claimUrl")}");
 ```
 
 ## How It Works
