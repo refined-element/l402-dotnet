@@ -787,11 +787,21 @@ public sealed class NwcWallet : IWallet, IDisposable
 
     internal static string EncryptNip04(string plaintext, byte[] recipientPubkeyBytes, ECPrivKey senderPrivKey)
     {
+        var iv = new byte[16];
+        RandomNumberGenerator.Fill(iv);
+        return EncryptNip04(plaintext, recipientPubkeyBytes, senderPrivKey, iv);
+    }
+
+    /// <summary>
+    /// Deterministic overload with an explicit 16-byte IV. Used by known-answer tests to
+    /// reproduce a fixed ciphertext byte-for-byte; production callers use the random-IV
+    /// overload above. The crypto is identical — only the IV source differs.
+    /// </summary>
+    internal static string EncryptNip04(string plaintext, byte[] recipientPubkeyBytes, ECPrivKey senderPrivKey, byte[] iv)
+    {
         var sharedX = ComputeSharedSecret(senderPrivKey, recipientPubkeyBytes);
 
         var plaintextBytes = Encoding.UTF8.GetBytes(plaintext);
-        var iv = new byte[16];
-        RandomNumberGenerator.Fill(iv);
 
         using var aes = Aes.Create();
         aes.Key = sharedX; // raw 32-byte X coordinate
@@ -843,17 +853,28 @@ public sealed class NwcWallet : IWallet, IDisposable
 
     internal static string EncryptNip44(string plaintext, byte[] recipientPubkeyBytes, ECPrivKey senderPrivKey)
     {
+        var nonce = new byte[32];
+        RandomNumberGenerator.Fill(nonce);
+        return EncryptNip44(plaintext, recipientPubkeyBytes, senderPrivKey, nonce);
+    }
+
+    /// <summary>
+    /// Deterministic overload with an explicit 32-byte nonce. Used by known-answer tests to
+    /// reproduce a fixed NIP-44 payload byte-for-byte; production callers use the random-nonce
+    /// overload above. The crypto is identical — only the nonce source differs.
+    /// </summary>
+    internal static string EncryptNip44(string plaintext, byte[] recipientPubkeyBytes, ECPrivKey senderPrivKey, byte[] nonce)
+    {
         var plaintextBytes = Encoding.UTF8.GetBytes(plaintext);
         if (plaintextBytes.Length < 1 || plaintextBytes.Length > 65535)
             throw new ArgumentException($"Plaintext length {plaintextBytes.Length} out of range (1-65535)");
+        if (nonce.Length != 32)
+            throw new ArgumentException("NIP-44 nonce must be 32 bytes", nameof(nonce));
 
         var sharedX = ComputeSharedSecret(senderPrivKey, recipientPubkeyBytes);
 
         var salt = Encoding.UTF8.GetBytes("nip44-v2");
         var conversationKey = HKDF.Extract(HashAlgorithmName.SHA256, sharedX, salt);
-
-        var nonce = new byte[32];
-        RandomNumberGenerator.Fill(nonce);
 
         var messageKeys = new byte[76];
         HKDF.Expand(HashAlgorithmName.SHA256, conversationKey, messageKeys, nonce);
