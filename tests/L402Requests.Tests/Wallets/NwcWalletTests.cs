@@ -331,16 +331,14 @@ public class NwcWalletTests
 
     #endregion
 
-    #region Outbound encryption defaults to NIP-04
+    #region Outbound encryption build (NIP-04 vs NIP-44 v2)
 
     [Fact]
-    public void BuildPayInvoiceRequest_DefaultsToNip04Encryption()
+    public void BuildPayInvoiceRequest_Nip04_ProducesIvMarkerAndNoEncryptionTag()
     {
-        // The outbound pay_invoice event must be NIP-04 encrypted by default
-        // (CoinOS silently drops NIP-44 v2). We verify by decrypting the event
-        // content from the wallet side using the SAME ECDH pair and asserting we
-        // recover the pay_invoice JSON — and that the content carries the NIP-04
-        // "?iv=" marker.
+        // NIP-04 outbound: content carries the "?iv=" marker and there is NO "encryption"
+        // tag (its absence is the original NIP-47 NIP-04 default). We verify by decrypting
+        // the event content from the wallet side using the SAME ECDH pair.
         var (walletPriv, walletPub) = GenerateKeyPair();
         var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
 
@@ -350,10 +348,14 @@ public class NwcWalletTests
         var wallet = new NwcWallet(connStr);
 
         var bolt11 = "lnbc100n1p3xyztest";
-        var (eventObj, _) = wallet.BuildPayInvoiceRequestForTest(bolt11);
+        var (eventObj, _) = wallet.BuildPayInvoiceRequestForTest(bolt11, NwcEncryption.Nip04);
 
         var content = eventObj["content"]!.GetValue<string>();
-        content.Should().Contain("?iv=", "default outbound encryption is NIP-04");
+        content.Should().Contain("?iv=", "NIP-04 output carries the IV marker");
+
+        var tags = eventObj["tags"]!.AsArray();
+        tags.Any(t => t?.AsArray()?[0]?.GetValue<string>() == "encryption")
+            .Should().BeFalse("NIP-04 requests must NOT carry an encryption tag");
 
         // Decrypt from the wallet's perspective: sender = client pubkey on the event.
         var clientPubHex = eventObj["pubkey"]!.GetValue<string>();
@@ -367,6 +369,184 @@ public class NwcWalletTests
         // And the event must be a valid, self-signed kind-23194 request.
         NwcWallet.IsResponseEventTrustworthy(eventObj, clientPubHex, out var reason)
             .Should().BeTrue($"our own request event must verify; reason: {reason}");
+    }
+
+    [Fact]
+    public void BuildPayInvoiceRequest_Nip44_ProducesEncryptionTagAndNoIvMarker()
+    {
+        // NIP-44 v2 outbound: content is a single base64 blob (no "?iv=") AND the event
+        // carries the ["encryption","nip44_v2"] tag required so Alby-Hub-style wallets
+        // decrypt it. Verify by NIP-44-decrypting the content from the wallet side.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=wss://relay.example.com&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr);
+
+        var bolt11 = "lnbc100n1p3xyztest";
+        var (eventObj, _) = wallet.BuildPayInvoiceRequestForTest(bolt11, NwcEncryption.Nip44V2);
+
+        var content = eventObj["content"]!.GetValue<string>();
+        content.Should().NotContain("?iv=", "NIP-44 output must not carry the NIP-04 IV marker");
+
+        var tags = eventObj["tags"]!.AsArray();
+        var encTag = tags
+            .Select(t => t?.AsArray())
+            .FirstOrDefault(t => t != null && t.Count >= 2 && t[0]?.GetValue<string>() == "encryption");
+        encTag.Should().NotBeNull("NIP-44 requests must carry an encryption tag");
+        encTag![1]?.GetValue<string>().Should().Be("nip44_v2");
+
+        // Decrypt from the wallet's perspective via NIP-44 v2.
+        var clientPubHex = eventObj["pubkey"]!.GetValue<string>();
+        var clientPubBytes = Convert.FromHexString(clientPubHex);
+        var decrypted = NwcWallet.DecryptNip44(content, clientPubBytes, walletPriv);
+
+        using var doc = JsonDocument.Parse(decrypted);
+        doc.RootElement.GetProperty("method").GetString().Should().Be("pay_invoice");
+        doc.RootElement.GetProperty("params").GetProperty("invoice").GetString().Should().Be(bolt11);
+
+        // The event must remain a valid, self-signed kind-23194 request (tag is part of the id).
+        NwcWallet.IsResponseEventTrustworthy(eventObj, clientPubHex, out var reason)
+            .Should().BeTrue($"our own request event must verify; reason: {reason}");
+    }
+
+    #endregion
+
+    #region NWC_ENCRYPTION mode selection + INFO-tag picker
+
+    [Fact]
+    public void NwcEncryption_Default_IsAuto()
+    {
+        NwcEncryption.Default.Should().Be("auto");
+    }
+
+    [Fact]
+    public void NwcEncryption_IsValid_AcceptsKnownSchemesOnly()
+    {
+        NwcEncryption.IsValid("nip04").Should().BeTrue();
+        NwcEncryption.IsValid("nip44_v2").Should().BeTrue();
+        NwcEncryption.IsValid("auto").Should().BeTrue();
+        NwcEncryption.IsValid("nip44").Should().BeFalse("nip44_v2 is the only NIP-44 variant we support");
+        NwcEncryption.IsValid("").Should().BeFalse();
+        NwcEncryption.IsValid(null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Constructor_DefaultsToAutoEncryption()
+    {
+        var wallet = new NwcWallet(ValidConnectionString);
+        wallet.ConfiguredEncryption.Should().Be("auto");
+    }
+
+    [Theory]
+    [InlineData("nip04", "nip04")]
+    [InlineData("nip44_v2", "nip44_v2")]
+    [InlineData("auto", "auto")]
+    [InlineData("NIP44_V2", "nip44_v2")]  // case-insensitive
+    [InlineData(" nip04 ", "nip04")]       // trimmed
+    [InlineData("bogus", "auto")]          // invalid → default
+    public void Constructor_EncryptionParam_NormalizesOrFallsBack(string param, string expected)
+    {
+        var wallet = new NwcWallet(ValidConnectionString, encryption: param);
+        wallet.ConfiguredEncryption.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("nip04 nip44_v2", "nip44_v2")]
+    [InlineData("nip44_v2 nip04", "nip44_v2")]
+    [InlineData("nip04", "nip04")]
+    [InlineData("nip44_v2", "nip44_v2")]
+    [InlineData("nip04,nip44_v2", "nip44_v2")] // comma separator tolerated
+    [InlineData("NIP04 NIP44_V2", "nip44_v2")] // case-insensitive
+    [InlineData("nip04  nip44_v2", "nip44_v2")] // double spaces
+    [InlineData("", "nip04")]                   // empty → fallback
+    [InlineData(null, "nip04")]                 // null → fallback
+    [InlineData("nip99_alpha", "nip04")]        // unknown scheme → fallback
+    public void PickEncryptionFromInfoTag_PicksStrongestOrFallsBack(string? tagValue, string expected)
+    {
+        NwcWallet.PickEncryptionFromInfoTag(tagValue).Should().Be(expected);
+    }
+
+    #endregion
+
+    #region NIP-44 v2 padded-length known vectors
+
+    [Theory]
+    [InlineData(1, 32)]
+    [InlineData(16, 32)]
+    [InlineData(32, 32)]
+    [InlineData(33, 64)]
+    [InlineData(64, 64)]
+    [InlineData(65, 96)]
+    [InlineData(100, 128)]
+    [InlineData(256, 256)]
+    [InlineData(300, 320)]
+    public void CalcPaddedLen_ReturnsExpectedValues(int input, int expected)
+    {
+        NwcWallet.CalcPaddedLen(input).Should().Be(expected);
+    }
+
+    [Fact]
+    public void CalcPaddedLen_Zero_Throws()
+    {
+        var act = () => NwcWallet.CalcPaddedLen(0);
+        act.Should().Throw<ArgumentException>();
+    }
+
+    #endregion
+
+    #region INFO-event (kind 13194) signature verification
+
+    [Fact]
+    public void VerifyNostrEventSignature_TamperedEncryptionTag_ReturnsFalse()
+    {
+        // A relay-injected 13194 event with a forged encryption tag must fail verification:
+        // tampering after signing changes the recomputed event id, so the sig no longer matches.
+        var (privKey, pubKeyBytes) = GenerateKeyPair();
+        var pubkeyHex = Convert.ToHexString(pubKeyBytes).ToLowerInvariant();
+        var ev = BuildSignedInfoEvent(privKey, pubkeyHex, "nip04 nip44_v2");
+
+        ev["tags"]!.AsArray()
+            .Where(t => t?.AsArray()?[0]?.GetValue<string>() == "encryption")
+            .Select(t => t!.AsArray())
+            .First()[1] = "nip04"; // force a downgrade
+
+        NwcWallet.VerifyNostrEventSignature(ev)
+            .Should().BeFalse("tampering with the encryption tag must invalidate the signature");
+    }
+
+    [Fact]
+    public void VerifyNostrEventSignature_ValidInfoEvent_ReturnsTrue()
+    {
+        var (privKey, pubKeyBytes) = GenerateKeyPair();
+        var pubkeyHex = Convert.ToHexString(pubKeyBytes).ToLowerInvariant();
+        var ev = BuildSignedInfoEvent(privKey, pubkeyHex, "nip04 nip44_v2");
+
+        NwcWallet.VerifyNostrEventSignature(ev)
+            .Should().BeTrue("a correctly signed INFO event must verify");
+    }
+
+    private static JsonObject BuildSignedInfoEvent(ECPrivKey privKey, string pubkeyHex, string encryptionTagValue)
+    {
+        var createdAt = 1700000000L;
+        var tags = new JsonArray { new JsonArray { "encryption", encryptionTagValue } };
+        var content = "Wallet capabilities: pay_invoice get_balance";
+        var id = NwcWallet.ComputeEventId(pubkeyHex, createdAt, 13194, tags, content);
+
+        privKey.TrySignBIP340(Convert.FromHexString(id), null, out var sig);
+
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["pubkey"] = pubkeyHex,
+            ["created_at"] = createdAt,
+            ["kind"] = 13194,
+            ["tags"] = JsonNode.Parse(tags.ToJsonString()),
+            ["content"] = content,
+            ["sig"] = Convert.ToHexString(sig!.ToBytes()).ToLowerInvariant()
+        };
     }
 
     #endregion
@@ -395,6 +575,140 @@ public class NwcWalletTests
         var result = await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
 
         result.Should().Be(preimage);
+    }
+
+    [Fact]
+    public async Task PayInvoiceAsync_Nip44OnlyWallet_AutoDetectsNip44_AndPays()
+    {
+        // THE BUG FIX. The wallet only understands NIP-44 v2 (Alby Hub): it silently
+        // ignores a NIP-04 request, and it advertises "nip04 nip44_v2" in its NIP-47 INFO
+        // event (kind 13194). With outbound auto-detect, the client fetches the INFO event,
+        // picks nip44_v2, sends a NIP-44 request, and gets paid. Before the fix, the client
+        // sent NIP-04 unconditionally, the wallet never replied, and the pay timed out.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "a1b2c3d4e5f6071829304a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7d8e9f";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage)
+        {
+            InfoEncryptionTag = "nip04 nip44_v2",
+            RequireNip44 = true
+        };
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        // encryption: "auto" is the default; pass explicitly so an ambient NWC_ENCRYPTION
+        // env var can't influence the test.
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(10), encryption: "auto");
+
+        var result = await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+
+        result.Should().Be(preimage, "auto-detect must pick nip44_v2 for an Alby-Hub-style wallet");
+    }
+
+    [Fact]
+    public async Task PayInvoiceAsync_ExplicitNip44_AgainstNip44OnlyWallet_Pays()
+    {
+        // Explicit nip44_v2 override skips the INFO fetch entirely and still pays a
+        // NIP-44-only wallet. (No InfoEncryptionTag configured on the relay.)
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage)
+        {
+            RequireNip44 = true
+        };
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(10), encryption: "nip44_v2");
+
+        var result = await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+
+        result.Should().Be(preimage);
+    }
+
+    [Fact]
+    public async Task PayInvoiceAsync_ExplicitNip04_AgainstNip44OnlyWallet_TimesOutWithMismatchHint()
+    {
+        // Regression proof: the OLD hard-coded-NIP-04 behaviour against a NIP-44-only wallet.
+        // The request is silently dropped, no reply arrives, and the pay times out with a
+        // message that names the scheme used and points at the nip44_v2 swap.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage)
+        {
+            RequireNip44 = true
+        };
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(3), encryption: "nip04");
+
+        var act = async () => await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+        var ex = (await act.Should().ThrowAsync<PaymentFailedException>(
+            "a NIP-04 request to a NIP-44-only wallet gets no reply")).Which;
+        ex.Message.Should().Contain("nip44_v2", "the timeout message must hint at the encryption swap");
+    }
+
+    [Fact]
+    public async Task ResolveAutoEncryptionAsync_CachesInfoEventResult()
+    {
+        // Auto-detect must fetch the INFO event exactly once and cache the result — repeated
+        // resolves must not re-open the relay connection.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, "00")
+        {
+            InfoEncryptionTag = "nip04 nip44_v2"
+        };
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, encryption: "auto");
+
+        var first = await wallet.ResolveAutoEncryptionAsync(default);
+        var second = await wallet.ResolveAutoEncryptionAsync(default);
+
+        first.Should().Be("nip44_v2");
+        second.Should().Be("nip44_v2");
+        wallet.InfoEventFetchCount.Should().Be(1, "the INFO event must be fetched once and cached");
+    }
+
+    [Fact]
+    public async Task ResolveAutoEncryptionAsync_NoInfoEvent_FallsBackToNip04()
+    {
+        // A wallet that never published a kind-13194 event (relay answers the probe with
+        // EOSE only) must resolve to NIP-04 — the original NIP-47 default.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, "00");
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, encryption: "auto");
+
+        var resolved = await wallet.ResolveAutoEncryptionAsync(default);
+
+        resolved.Should().Be("nip04");
     }
 
     [Fact]

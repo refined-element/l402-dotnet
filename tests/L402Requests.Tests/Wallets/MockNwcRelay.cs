@@ -46,6 +46,23 @@ internal sealed class MockNwcRelay : IAsyncDisposable
     /// </summary>
     public bool MalformedJsonPayload { get; set; }
 
+    /// <summary>
+    /// When set, a REQ for kind 13194 (the client's NIP-47 INFO-event auto-detect probe)
+    /// is answered with a signed kind-13194 event whose <c>encryption</c> tag carries this
+    /// value (e.g. <c>"nip04 nip44_v2"</c>), then EOSE. When null, the probe gets EOSE only
+    /// (simulating an older wallet that never published a 13194 event → client falls back to
+    /// NIP-04).
+    /// </summary>
+    public string? InfoEncryptionTag { get; set; }
+
+    /// <summary>
+    /// When true, the "wallet" only understands NIP-44 v2: a kind-23194 request encrypted
+    /// with NIP-04 (has the <c>?iv=</c> marker) is silently ignored (no 23195 reply),
+    /// modelling Alby Hub. A NIP-44 request is decrypted and answered normally. This is the
+    /// exact condition under which a NIP-04-only client times out — the bug under test.
+    /// </summary>
+    public bool RequireNip44 { get; set; }
+
     public MockNwcRelay(ECPrivKey walletPriv, string walletPubkeyHex, string preimageHex)
     {
         _walletPriv = walletPriv;
@@ -117,10 +134,29 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                 var type = arr[0]?.GetValue<string>();
                 if (type == "REQ")
                 {
-                    subId = arr[1]?.GetValue<string>();
-                    // Acknowledge end of stored events so the client moves to live mode.
-                    var eose = new JsonArray { "EOSE", subId };
-                    await SendAsync(ws, eose.ToJsonString());
+                    var reqSubId = arr[1]?.GetValue<string>();
+                    var filter = arr.Count > 2 ? arr[2]?.AsObject() : null;
+                    var kinds = filter?["kinds"]?.AsArray();
+                    var wantsInfo = kinds != null && kinds.Any(k => k?.GetValue<int>() == 13194);
+
+                    if (wantsInfo)
+                    {
+                        // The client's NIP-47 INFO-event auto-detect probe (its own connection).
+                        // Answer with a signed 13194 event when configured, then EOSE.
+                        if (InfoEncryptionTag != null)
+                        {
+                            var infoEv = BuildSignedInfoEvent(InfoEncryptionTag);
+                            var infoMsg = new JsonArray { "EVENT", reqSubId, JsonNode.Parse(infoEv.ToJsonString()) };
+                            await SendAsync(ws, infoMsg.ToJsonString());
+                        }
+                        await SendAsync(ws, new JsonArray { "EOSE", reqSubId }.ToJsonString());
+                    }
+                    else
+                    {
+                        // The pay-response subscription (kind 23195). Remember its id for the reply.
+                        subId = reqSubId;
+                        await SendAsync(ws, new JsonArray { "EOSE", reqSubId }.ToJsonString());
+                    }
                 }
                 else if (type == "EVENT" && arr.Count >= 2)
                 {
@@ -133,8 +169,15 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                     var clientPubBytes = Convert.FromHexString(clientPubHex);
                     var encryptedReq = ev["content"]?.GetValue<string>() ?? "";
 
-                    // Acknowledge the published event.
+                    // Acknowledge the published event (relay-level OK — independent of whether
+                    // the wallet can decrypt/process it).
                     await SendAsync(ws, new JsonArray { "OK", reqEventId, true, "" }.ToJsonString());
+
+                    // NIP-04 requests carry the "?iv=" marker; NIP-44 v2 requests are a single
+                    // base64 blob. A NIP-44-only wallet silently ignores a NIP-04 request.
+                    var isNip44Request = !encryptedReq.Contains("?iv=");
+                    if (RequireNip44 && !isNip44Request)
+                        continue; // Alby-Hub-style: drop the undecryptable NIP-04 request, no reply.
 
                     // Try to decrypt the request to confirm it's a real pay_invoice.
                     // In the forged-relay test the relay's key is the ATTACKER's, which
@@ -165,8 +208,11 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                             ["result"] = new JsonObject { ["preimage"] = _preimageHex }
                         }.ToJsonString();
 
-                    // Encrypt for the client using the wallet privkey + client pubkey (NIP-04).
-                    var encryptedResp = NwcWallet.EncryptNip04(responsePayload, clientPubBytes, _walletPriv);
+                    // Reply using the same scheme the client used for its request, so a
+                    // NIP-44 request gets a NIP-44 reply (the client auto-detects inbound).
+                    var encryptedResp = isNip44Request
+                        ? NwcWallet.EncryptNip44(responsePayload, clientPubBytes, _walletPriv)
+                        : NwcWallet.EncryptNip04(responsePayload, clientPubBytes, _walletPriv);
 
                     var createdAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                     var tags = new JsonArray
@@ -198,6 +244,30 @@ internal sealed class MockNwcRelay : IAsyncDisposable
         {
             // Connection closed / cancelled during shutdown — expected.
         }
+    }
+
+    /// <summary>
+    /// Builds a signed kind-13194 (NIP-47 INFO) event advertising the given encryption
+    /// schemes, so the client's auto-detect probe verifies it and reads the tag.
+    /// </summary>
+    private JsonObject BuildSignedInfoEvent(string encryptionTag)
+    {
+        var createdAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var tags = new JsonArray { new JsonArray { "encryption", encryptionTag } };
+        const string content = "Wallet capabilities: pay_invoice get_balance make_invoice";
+        var id = NwcWallet.ComputeEventId(_walletPubkeyHex, createdAt, 13194, tags, content);
+        _walletPriv.TrySignBIP340(Convert.FromHexString(id), null, out var sig);
+
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["pubkey"] = _walletPubkeyHex,
+            ["created_at"] = createdAt,
+            ["kind"] = 13194,
+            ["tags"] = JsonNode.Parse(tags.ToJsonString()),
+            ["content"] = content,
+            ["sig"] = Convert.ToHexString(sig!.ToBytes()).ToLowerInvariant()
+        };
     }
 
     private static async Task SendAsync(WebSocket ws, string text)
