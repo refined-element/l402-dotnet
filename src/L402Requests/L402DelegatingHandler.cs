@@ -64,11 +64,20 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         // flows can rebuild "L402 {macaroon}:{preimage}". MPP challenges have none.
         var challengeMacaroon = challenge is L402Challenge l402Challenge ? l402Challenge.Macaroon : "";
 
-        if (_budget is not null && amountSats.HasValue)
-            _budget.Check(amountSats.Value, domain);
+        // An amount we can't determine is an amount we can't authorise. Paying anyway
+        // would skip Check() entirely — and that call is not just the per-request/hour/day
+        // sats limits but the domain allowlist too — while the spend would never reach the
+        // log below, hiding it from every LATER budget check. A server after a blank cheque
+        // need only send an amountless invoice. Refuse before any funds move.
+        if (!amountSats.HasValue)
+            throw new InvoiceAmountUnknownException(
+                Bolt11Invoice.ClassifyMissingAmount(challenge.Invoice), challenge.Invoice);
+
+        _budget?.Check(amountSats.Value, domain);
 
         // Pay the invoice
         var wallet = GetWallet();
+        L402HttpClient.RejectWalletWithoutPreimage(wallet);
         string preimage;
         try
         {
@@ -76,20 +85,17 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         }
         catch (Exception e)
         {
-            if (amountSats.HasValue)
-                SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
+            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
 
             if (e is L402Exception)
                 throw;
             throw new PaymentFailedException(e.Message, challenge.Invoice);
         }
 
-        // Record successful payment
-        if (amountSats.HasValue)
-        {
-            _budget?.RecordPayment(amountSats.Value);
-            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
-        }
+        // Record successful payment. amountSats is always known by this point — unknown
+        // amounts were refused above — so every payment lands in the budget and the log.
+        _budget?.RecordPayment(amountSats.Value);
+        SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
 
         // Cache the credential and use the returned credential directly for the retry header.
         // This avoids a second cache lookup that could fail if the cache evicts immediately.

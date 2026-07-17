@@ -102,3 +102,62 @@ public class DomainNotAllowedException : L402Exception
         Domain = domain;
     }
 }
+
+/// <summary>
+/// The invoice amount could not be determined, so payment was refused.
+/// Raised <em>before</em> the payment is attempted.
+/// </summary>
+/// <remarks>
+/// An amount we cannot read is an amount we cannot check against the budget limits or
+/// the domain allowlist, and one that would never reach the spending log — so paying it
+/// would spend an unknown sum with every control silently skipped. No funds are spent.
+/// Like <see cref="UnsupportedWalletException"/> this is a precondition failure rather
+/// than a payment failure: code catching <see cref="PaymentFailedException"/> to retry
+/// or log payment problems should not expect it.
+/// </remarks>
+public class InvoiceAmountUnknownException : L402Exception
+{
+    /// <summary>Why the amount could not be determined.</summary>
+    public MissingAmountReason Reason { get; }
+
+    /// <summary>The offending invoice, when available.</summary>
+    public string? Bolt11 { get; }
+
+    public InvoiceAmountUnknownException(MissingAmountReason reason, string? bolt11 = null)
+        : base($"Refusing to pay: {Describe(reason)}, so its amount cannot be checked " +
+               "against your budget. Only invoices with an explicit, readable amount are supported.")
+    {
+        Reason = reason;
+        Bolt11 = bolt11;
+    }
+
+    private static string Describe(MissingAmountReason reason) => reason switch
+    {
+        MissingAmountReason.NoAmountEncoded => "the invoice encodes no amount",
+        MissingAmountReason.Unparseable => "the invoice could not be parsed as BOLT11",
+        MissingAmountReason.AmountOutOfRange => "the invoice amount is too large to represent in satoshis",
+        _ => "the invoice amount could not be determined",
+    };
+}
+
+/// <summary>
+/// The configured wallet cannot fulfill L402's preimage requirement.
+/// Raised <em>before</em> the payment is attempted.
+/// </summary>
+/// <remarks>
+/// Thrown when the wallet's <see cref="Wallets.IWallet.SupportsPreimage"/> is false
+/// (e.g. OpenNode). L402 needs the preimage to build the Authorization header, so paying
+/// would spend funds for no access. This is a configuration failure, not a payment
+/// failure: code catching <see cref="PaymentFailedException"/> should not expect it.
+/// No funds are spent.
+/// </remarks>
+public class UnsupportedWalletException : L402Exception
+{
+    public string WalletReason { get; }
+
+    public UnsupportedWalletException(string walletReason)
+        : base($"Wallet cannot be used for L402: {walletReason}")
+    {
+        WalletReason = walletReason;
+    }
+}

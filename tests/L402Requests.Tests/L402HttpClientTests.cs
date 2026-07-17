@@ -141,6 +141,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create402Response());
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new PaymentFailedException("insufficient balance", TestInvoice));
 
@@ -167,6 +168,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response());
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -197,6 +199,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("second response"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -226,6 +229,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("created"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -248,6 +252,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response());
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -269,6 +274,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response());
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -353,6 +359,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("paid via l402"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -383,6 +390,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("second response"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -419,6 +427,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("paid"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(zeroAmountInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 
@@ -468,6 +477,7 @@ public class L402HttpClientTests
         handler.EnqueueResponse(Create200Response("paid"));
 
         var mockWallet = new Mock<IWallet>();
+        mockWallet.Setup(w => w.SupportsPreimage).Returns(true);
         mockWallet.Setup(w => w.PayInvoiceAsync(TestInvoice, It.IsAny<CancellationToken>()))
             .ReturnsAsync(TestPreimage);
 

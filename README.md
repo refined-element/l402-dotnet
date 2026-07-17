@@ -34,7 +34,7 @@ Set environment variables for your preferred wallet. The library auto-detects in
 | 1 | LND | `LND_REST_HOST`, `LND_MACAROON_HEX` | Yes |
 | 2 | NWC | `NWC_CONNECTION_STRING` | Yes (CoinOS, CLINK) |
 | 3 | Strike | `STRIKE_API_KEY` | Yes |
-| 4 | OpenNode | `OPENNODE_API_KEY` | Limited |
+| 4 | OpenNode | `OPENNODE_API_KEY` | No — [cannot be used for L402](#opennode-not-usable-for-l402) |
 
 **Recommended:** Strike (full preimage support, no infrastructure required).
 
@@ -58,13 +58,15 @@ export LND_TLS_CERT_PATH="/path/to/tls.cert"  # optional
 export NWC_CONNECTION_STRING="nostr+walletconnect://pubkey?relay=wss://relay&secret=hex"
 ```
 
-### OpenNode
+### OpenNode (not usable for L402)
 
-```bash
-export OPENNODE_API_KEY="your-opennode-key"
-```
+OpenNode does not return payment preimages, and L402 needs the preimage to build the `Authorization` header — so an OpenNode payment settles and still buys no access.
 
-> **Note:** OpenNode does not return payment preimages, which limits L402 functionality. For full L402 support, use Strike, LND, or a compatible NWC wallet.
+> **Behaviour change in 0.7.0.** Every 402 now throws `UnsupportedWalletException` **before** any funds move. Previously the withdrawal was submitted first and only then failed with `PaymentFailedException` — you paid and got nothing.
+>
+> **This can break existing error handling.** `UnsupportedWalletException` is not a `PaymentFailedException` subclass, so a `catch (PaymentFailedException)` that used to swallow this now misses it and the exception escapes. See [Error Handling](#error-handling).
+>
+> OpenNode is still auto-detected, so an `OPENNODE_API_KEY`-only setup keeps resolving to a wallet that refuses every request. Switch to Strike, LND, or a compatible NWC wallet (CoinOS, CLINK, Alby Hub).
 
 ## Budget Controls
 
@@ -181,7 +183,7 @@ Console.WriteLine($"Share this with the recipient: {claimBody.GetProperty("claim
 2. If the server returns **200**, the response is returned as-is
 3. If the server returns **402** with an L402 challenge:
    - The `WWW-Authenticate: L402 macaroon="...", invoice="..."` header is parsed
-   - The BOLT11 invoice amount is checked against your budget
+   - The BOLT11 invoice amount is checked against your budget — an invoice whose amount can't be read is refused, not paid
    - The invoice is paid via your configured Lightning wallet
    - The request is retried with `Authorization: L402 {macaroon}:{preimage}`
 4. Credentials are cached so subsequent requests to the same endpoint don't require re-payment
@@ -200,6 +202,14 @@ catch (BudgetExceededException e)
 {
     Console.WriteLine($"Over budget: {e.LimitType} limit is {e.LimitSats} sats");
 }
+catch (InvoiceAmountUnknownException e)
+{
+    Console.WriteLine($"Refused unpriceable invoice: {e.Reason}");
+}
+catch (UnsupportedWalletException e)
+{
+    Console.WriteLine($"Wallet unusable for L402: {e.WalletReason}");
+}
 catch (PaymentFailedException e)
 {
     Console.WriteLine($"Payment failed: {e.Reason}");
@@ -210,14 +220,20 @@ catch (NoWalletException)
 }
 ```
 
-| Exception | When |
-|-----------|------|
-| `BudgetExceededException` | Payment would exceed a budget limit |
-| `PaymentFailedException` | Lightning payment failed |
-| `InvoiceExpiredException` | Invoice expired before payment |
-| `NoWalletException` | No wallet env vars detected |
-| `DomainNotAllowedException` | Domain not in `AllowedDomains` |
-| `ChallengeParseException` | Malformed L402 challenge header |
+| Exception | When | Funds moved |
+|-----------|------|-------------|
+| `BudgetExceededException` | Payment would exceed a budget limit | No |
+| `InvoiceAmountUnknownException` | Invoice amount could not be determined, so it could not be checked against your budget | No |
+| `UnsupportedWalletException` | Configured wallet cannot return preimages (OpenNode) | No |
+| `PaymentFailedException` | Lightning payment failed | Maybe |
+| `InvoiceExpiredException` | Invoice expired before payment | No |
+| `NoWalletException` | No wallet env vars detected | No |
+| `DomainNotAllowedException` | Domain not in `AllowedDomains` | No |
+| `ChallengeParseException` | Malformed L402 challenge header | No |
+
+All of them derive from `L402Exception`, so `catch (L402Exception)` handles every case in one block.
+
+**New in 0.7.0:** `InvoiceAmountUnknownException` and `UnsupportedWalletException`. Both are *precondition* failures raised before a payment is attempted, so neither derives from `PaymentFailedException` — code that only catches `PaymentFailedException` will not catch them. See [OpenNode](#opennode-not-usable-for-l402) for the case most likely to hit existing deployments.
 
 ## Usage with AI Agents
 
