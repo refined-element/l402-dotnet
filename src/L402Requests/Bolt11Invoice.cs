@@ -18,6 +18,12 @@ public enum MissingAmountReason
 
     /// <summary>The string could not be read as a BOLT11 invoice at all.</summary>
     Unparseable,
+
+    /// <summary>
+    /// An amount was encoded, but it is too large to represent in satoshis
+    /// (above <see cref="int.MaxValue"/>, i.e. ~21.47 BTC).
+    /// </summary>
+    AmountOutOfRange,
 }
 
 /// <summary>
@@ -57,12 +63,17 @@ public static class Bolt11Invoice
         if (string.IsNullOrWhiteSpace(bolt11))
             return MissingAmountReason.Unparseable;
 
-        if (!Bolt11Pattern.IsMatch(bolt11.Trim().ToLowerInvariant()))
+        var match = Bolt11Pattern.Match(bolt11.Trim().ToLowerInvariant());
+        if (!match.Success)
             return MissingAmountReason.Unparseable;
 
-        // The prefix read cleanly, so a missing amount group is the only way
-        // ExtractAmountSats could have returned null for this invoice.
-        return MissingAmountReason.NoAmountEncoded;
+        // The prefix read cleanly. With no amount group there was nothing to price;
+        // with one, ExtractAmountSats only returns null when the value overflows, so
+        // that is the remaining explanation. Deciding it from the match rather than
+        // redoing the arithmetic keeps this in step with ExtractAmountSats.
+        return match.Groups["amount"].Success
+            ? MissingAmountReason.AmountOutOfRange
+            : MissingAmountReason.NoAmountEncoded;
     }
 
     /// <summary>
@@ -75,9 +86,9 @@ public static class Bolt11Invoice
     /// </remarks>
     /// <param name="bolt11">A BOLT11-encoded Lightning invoice (e.g., "lnbc10u1p...").</param>
     /// <returns>
-    /// Amount in satoshis, or null if the amount cannot be determined — either none is
-    /// encoded (zero-amount / "any amount" invoices) or the invoice cannot be parsed.
-    /// Use <see cref="ClassifyMissingAmount"/> to tell those apart.
+    /// Amount in satoshis, or null if the amount cannot be determined — none is encoded
+    /// (zero-amount / "any amount" invoices), the invoice cannot be parsed, or the amount
+    /// is too large to represent. Use <see cref="ClassifyMissingAmount"/> to tell those apart.
     /// </returns>
     public static int? ExtractAmountSats(string bolt11)
     {
@@ -93,20 +104,32 @@ public static class Bolt11Invoice
         if (!amountGroup.Success)
             return null; // "any amount" invoice
 
-        var amount = decimal.Parse(amountGroup.Value);
-        var multiplierGroup = match.Groups["multiplier"];
-
-        decimal btcAmount;
-        if (multiplierGroup.Success)
+        try
         {
-            var multiplierChar = char.ToLowerInvariant(multiplierGroup.Value[0]);
-            btcAmount = amount * Multipliers[multiplierChar];
-        }
-        else
-        {
-            btcAmount = amount; // No multiplier means BTC
-        }
+            var amount = decimal.Parse(amountGroup.Value);
+            var multiplierGroup = match.Groups["multiplier"];
 
-        return (int)(btcAmount * SatsPerBtc);
+            decimal btcAmount;
+            if (multiplierGroup.Success)
+            {
+                var multiplierChar = char.ToLowerInvariant(multiplierGroup.Value[0]);
+                btcAmount = amount * Multipliers[multiplierChar];
+            }
+            else
+            {
+                btcAmount = amount; // No multiplier means BTC
+            }
+
+            return (int)(btcAmount * SatsPerBtc);
+        }
+        catch (OverflowException)
+        {
+            // Above int.MaxValue sats (~21.47 BTC) the total does not fit, and enough
+            // digits overflow decimal.Parse before that. Either way the amount is one we
+            // cannot state, which is the same position as an amountless invoice: return
+            // null so it takes the refusal path instead of throwing OverflowException out
+            // of the caller's send, past every documented L402Exception.
+            return null;
+        }
     }
 }

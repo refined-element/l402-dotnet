@@ -153,6 +153,29 @@ public class UnknownAmountRefusalTests
     }
 
     [Fact]
+    public async Task HttpClient_AmountAboveIntMax_RefusesWithoutPaying()
+    {
+        // The sats total is an int, so >~21.47 BTC overflowed it and threw a raw
+        // OverflowException straight out of SendAsync — bypassing this taxonomy, and
+        // any caller catching it. It failed closed (no funds moved), but an unreadable
+        // amount is an unknown amount, so it belongs on the same refusal path.
+        var handler = new MockHttpMessageHandler();
+        handler.EnqueueResponse(Create402("lnbc221ptest")); // 22 BTC
+
+        var mockWallet = CreatePayingWallet();
+        var client = new L402HttpClient(
+            new HttpClient(handler), mockWallet.Object,
+            new BudgetController(maxSatsPerRequest: 5000), new CredentialCache());
+
+        var act = () => client.GetAsync("https://example.com/paid-resource");
+
+        var ex = await act.Should().ThrowAsync<InvoiceAmountUnknownException>();
+        ex.Which.Reason.Should().Be(MissingAmountReason.AmountOutOfRange);
+        mockWallet.Verify(w => w.PayInvoiceAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        client.SpendingLog.Count.Should().Be(0);
+    }
+
+    [Fact]
     public async Task HttpClient_WalletWithoutPreimage_RefusesBeforePaying()
     {
         // L402's retry needs the preimage to build the Authorization header, so

@@ -117,7 +117,7 @@ public class DomainNotAllowedException : L402Exception
 /// </remarks>
 public class InvoiceAmountUnknownException : L402Exception
 {
-    /// <summary>Whether no amount was encoded, or the invoice could not be parsed.</summary>
+    /// <summary>Why the amount could not be determined.</summary>
     public MissingAmountReason Reason { get; }
 
     /// <summary>The offending invoice, when available.</summary>
@@ -125,7 +125,7 @@ public class InvoiceAmountUnknownException : L402Exception
 
     public InvoiceAmountUnknownException(MissingAmountReason reason, string? bolt11 = null)
         : base($"Refusing to pay: {Describe(reason)}, so its amount cannot be checked " +
-               "against your budget. Only invoices with an explicit amount are supported.")
+               "against your budget. Only invoices with an explicit, readable amount are supported.")
     {
         Reason = reason;
         Bolt11 = bolt11;
@@ -135,6 +135,7 @@ public class InvoiceAmountUnknownException : L402Exception
     {
         MissingAmountReason.NoAmountEncoded => "the invoice encodes no amount",
         MissingAmountReason.Unparseable => "the invoice could not be parsed as BOLT11",
+        MissingAmountReason.AmountOutOfRange => "the invoice amount is too large to represent in satoshis",
         _ => "the invoice amount could not be determined",
     };
 }
