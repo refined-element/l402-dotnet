@@ -3,6 +3,24 @@ using System.Text.RegularExpressions;
 namespace L402Requests;
 
 /// <summary>
+/// Why <see cref="Bolt11Invoice.ExtractAmountSats"/> could not determine an amount.
+/// Both values mean the amount is unknown and so cannot be authorised, but they
+/// point at different causes: a server that sent an amountless invoice, versus one
+/// that sent something malformed or unsupported.
+/// </summary>
+public enum MissingAmountReason
+{
+    /// <summary>
+    /// The invoice parsed fine but carries no amount — a zero-amount / "any amount"
+    /// invoice, where the payer picks the value.
+    /// </summary>
+    NoAmountEncoded,
+
+    /// <summary>The string could not be read as a BOLT11 invoice at all.</summary>
+    Unparseable,
+}
+
+/// <summary>
 /// Pure C# BOLT11 invoice amount extraction.
 /// Parses the human-readable part to extract the amount in satoshis.
 /// No external Lightning libraries required.
@@ -25,10 +43,42 @@ public static class Bolt11Invoice
     private const decimal SatsPerBtc = 100_000_000m;
 
     /// <summary>
+    /// Explain why <see cref="ExtractAmountSats"/> returned null for an invoice.
+    /// </summary>
+    /// <remarks>
+    /// Only meaningful when <see cref="ExtractAmountSats"/> returned null; it re-reads
+    /// the invoice to separate the two causes. Deliberately off the happy path — callers
+    /// use it to build an error message, not to decide pay vs. refuse.
+    /// </remarks>
+    /// <param name="bolt11">The invoice <see cref="ExtractAmountSats"/> could not price.</param>
+    /// <returns>Which of the two failure modes applies.</returns>
+    public static MissingAmountReason ClassifyMissingAmount(string bolt11)
+    {
+        if (string.IsNullOrWhiteSpace(bolt11))
+            return MissingAmountReason.Unparseable;
+
+        if (!Bolt11Pattern.IsMatch(bolt11.Trim().ToLowerInvariant()))
+            return MissingAmountReason.Unparseable;
+
+        // The prefix read cleanly, so a missing amount group is the only way
+        // ExtractAmountSats could have returned null for this invoice.
+        return MissingAmountReason.NoAmountEncoded;
+    }
+
+    /// <summary>
     /// Extract the amount in satoshis from a BOLT11 invoice string.
     /// </summary>
+    /// <remarks>
+    /// Callers must NOT read null as "no limit applies": an amount that cannot be
+    /// determined cannot be checked against a budget, so it must be refused rather
+    /// than paid.
+    /// </remarks>
     /// <param name="bolt11">A BOLT11-encoded Lightning invoice (e.g., "lnbc10u1p...").</param>
-    /// <returns>Amount in satoshis, or null if no amount is encoded (zero-amount / "any amount" invoices).</returns>
+    /// <returns>
+    /// Amount in satoshis, or null if the amount cannot be determined — either none is
+    /// encoded (zero-amount / "any amount" invoices) or the invoice cannot be parsed.
+    /// Use <see cref="ClassifyMissingAmount"/> to tell those apart.
+    /// </returns>
     public static int? ExtractAmountSats(string bolt11)
     {
         if (string.IsNullOrWhiteSpace(bolt11))

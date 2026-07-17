@@ -96,11 +96,20 @@ public sealed class L402HttpClient : IDisposable
         // flows can rebuild "L402 {macaroon}:{preimage}". MPP challenges have none.
         var challengeMacaroon = challenge is L402Challenge l402Challenge ? l402Challenge.Macaroon : "";
 
-        if (_budget is not null && amountSats.HasValue)
-            _budget.Check(amountSats.Value, domain);
+        // An amount we can't determine is an amount we can't authorise. Paying anyway
+        // would skip Check() entirely — and that call is not just the per-request/hour/day
+        // sats limits but the domain allowlist too — while the spend would never reach the
+        // log below, hiding it from every LATER budget check. A server after a blank cheque
+        // need only send an amountless invoice. Refuse before any funds move.
+        if (!amountSats.HasValue)
+            throw new InvoiceAmountUnknownException(
+                Bolt11Invoice.ClassifyMissingAmount(challenge.Invoice), challenge.Invoice);
+
+        _budget?.Check(amountSats.Value, domain);
 
         // Pay the invoice
         var wallet = GetWallet();
+        RejectWalletWithoutPreimage(wallet);
         string preimage;
         try
         {
@@ -108,20 +117,18 @@ public sealed class L402HttpClient : IDisposable
         }
         catch (Exception e)
         {
-            if (amountSats.HasValue)
-                SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
+            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
 
             if (e is L402Exception)
                 throw;
             throw new PaymentFailedException(e.Message, challenge.Invoice);
         }
 
-        // Record successful payment
-        if (amountSats.HasValue)
-        {
-            _budget?.RecordPayment(amountSats.Value);
-            SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
-        }
+        // Record successful payment. amountSats is always known by this point — unknown
+        // amounts were refused above — so every payment the client makes lands in the
+        // budget and the log, with no silent gaps.
+        _budget?.RecordPayment(amountSats.Value);
+        SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
 
         // Cache the credential and use the returned credential directly for the retry header.
         // This avoids a second cache lookup that could fail if the cache evicts immediately.
@@ -171,6 +178,26 @@ public sealed class L402HttpClient : IDisposable
     {
         _wallet ??= WalletDetector.DetectWallet();
         return _wallet;
+    }
+
+    /// <summary>
+    /// Fail fast on a wallet that can't surface a payment preimage.
+    /// </summary>
+    /// <remarks>
+    /// L402's retry needs the preimage to build the Authorization header, so paying with
+    /// such a wallet (OpenNode) would spend funds for no access — the invoice settles and
+    /// the credential still can't be assembled. Checked before the payment, not after it.
+    /// Shared by <see cref="L402HttpClient"/> and <see cref="L402DelegatingHandler"/> so
+    /// both surfaces refuse identically.
+    /// </remarks>
+    /// <exception cref="UnsupportedWalletException">If the wallet has no preimage support.</exception>
+    internal static void RejectWalletWithoutPreimage(IWallet wallet)
+    {
+        if (!wallet.SupportsPreimage)
+            throw new UnsupportedWalletException(
+                "configured wallet does not return Lightning payment preimages, which L402 " +
+                "requires. Use Strike, LND, or a compatible NWC wallet (CoinOS, CLINK, " +
+                "Alby Hub) instead.");
     }
 
     /// <summary>
