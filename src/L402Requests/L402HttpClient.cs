@@ -86,9 +86,10 @@ public sealed class L402HttpClient : IDisposable
         if (challenge is null)
             return response; // 402 but not L402/MPP — return as-is
 
-        // Extract amount and check budget.
-        // Prefer the BOLT11-encoded amount; fall back to MPP amount parameter for zero-amount invoices.
-        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice)
+        // Extract amount and check budget. Prefer the BOLT11-encoded amount, but
+        // only when it is strictly positive (PositiveSatsOrNull guards the literal-
+        // zero blank cheque); otherwise fall back to the MPP amount parameter.
+        var amountSats = PositiveSatsOrNull(Bolt11Invoice.ExtractAmountSats(challenge.Invoice))
             ?? (challenge is MppChallenge mppForBudget ? MppAmountToSats(mppForBudget.Amount) : null);
         var domain = uri.Host;
 
@@ -211,6 +212,20 @@ public sealed class L402HttpClient : IDisposable
             return null;
         return int.TryParse(amount, out var sats) && sats > 0 ? sats : null;
     }
+
+    /// <summary>
+    /// Collapse a non-positive BOLT11 amount to null so the resolved amount is
+    /// strictly positive from the BOLT11 branch too, not merely non-null.
+    /// </summary>
+    /// <remarks>
+    /// A literal-zero invoice ("lnbc0p1...") DECODES to 0, not null — the amount
+    /// field is present, it is just zero — so a bare "?? MppAmountToSats(...)"
+    /// short-circuits on the 0, Check(0) passes, and the wallet (not the server)
+    /// then picks the spend: the same blank-cheque hole ledger #42 closes on the
+    /// MPP branch. Mapping &lt;= 0 to null lets it fall through to the MPP amount
+    /// (itself guarded) or, failing that, onto the refusal path.
+    /// </remarks>
+    internal static int? PositiveSatsOrNull(int? sats) => sats is > 0 ? sats : null;
 
     private static async Task<HttpRequestMessage> CloneRequestAsync(HttpRequestMessage original)
     {

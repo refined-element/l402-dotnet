@@ -54,9 +54,10 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         if (challenge is null)
             return response;
 
-        // Extract amount and check budget.
-        // Prefer the BOLT11-encoded amount; fall back to MPP amount parameter for zero-amount invoices.
-        var amountSats = Bolt11Invoice.ExtractAmountSats(challenge.Invoice)
+        // Extract amount and check budget. Prefer the BOLT11-encoded amount, but
+        // only when it is strictly positive (PositiveSatsOrNull guards the literal-
+        // zero blank cheque); otherwise fall back to the MPP amount parameter.
+        var amountSats = L402HttpClient.PositiveSatsOrNull(Bolt11Invoice.ExtractAmountSats(challenge.Invoice))
             ?? (challenge is MppChallenge mppForBudget ? L402HttpClient.MppAmountToSats(mppForBudget.Amount) : null);
         var domain = uri.Host;
 
