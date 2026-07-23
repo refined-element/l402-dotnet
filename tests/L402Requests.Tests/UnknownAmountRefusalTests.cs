@@ -25,6 +25,12 @@ public class UnknownAmountRefusalTests
     private const string NoAmountInvoice = "lnbc1ptest";
     // Not a BOLT11 invoice at all.
     private const string UnparseableInvoice = "not-a-bolt11-invoice";
+    // A literal-zero invoice: the amount field is PRESENT and parses, it is just
+    // zero, so ExtractAmountSats returns 0 rather than null. A bare "?? mpp" /
+    // null-check lets that 0 through, Check(0) passes, and the wallet — not the
+    // server — then picks the spend: the same blank-cheque class ledger #42
+    // closes for the MPP branch, but reached on the BOLT11 branch instead.
+    private const string ZeroAmountInvoice = "lnbc0p1ptest";
 
     private static HttpResponseMessage Create402(string invoice)
     {
@@ -177,6 +183,28 @@ public class UnknownAmountRefusalTests
     }
 
     [Fact]
+    public async Task HttpClient_LiteralZeroAmount_RefusesWithoutPaying()
+    {
+        // Ledger #42, BOLT11 branch: "lnbc0p1..." decodes to 0, not null, so the
+        // #42 fix (which guarded only the MPP fallback) never saw it. A resolved
+        // amount of 0 is a blank cheque; the BOLT11 amount must be strictly
+        // positive too, or the request is refused before any funds move.
+        var handler = new MockHttpMessageHandler();
+        handler.EnqueueResponse(Create402(ZeroAmountInvoice));
+
+        var mockWallet = CreatePayingWallet();
+        var client = new L402HttpClient(
+            new HttpClient(handler), mockWallet.Object,
+            new BudgetController(maxSatsPerRequest: 5000), new CredentialCache());
+
+        var act = () => client.GetAsync("https://example.com/paid-resource");
+
+        await act.Should().ThrowAsync<InvoiceAmountUnknownException>();
+        mockWallet.Verify(w => w.PayInvoiceAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        client.SpendingLog.Count.Should().Be(0);
+    }
+
+    [Fact]
     public async Task HttpClient_AmountAboveIntMax_RefusesWithoutPaying()
     {
         // The sats total is an int, so >~21.47 BTC overflowed it and threw a raw
@@ -293,6 +321,25 @@ public class UnknownAmountRefusalTests
 
         var ex = await act.Should().ThrowAsync<InvoiceAmountUnknownException>();
         ex.Which.Reason.Should().Be(MissingAmountReason.NoAmountEncoded);
+        mockWallet.Verify(w => w.PayInvoiceAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        l402Handler.SpendingLog.Count.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task DelegatingHandler_LiteralZeroAmount_RefusesWithoutPaying()
+    {
+        // Ledger #42 on the second surface: the same literal-zero blank cheque
+        // must be refused identically through the delegating handler.
+        var inner = new MockHttpMessageHandler();
+        inner.EnqueueResponse(Create402(ZeroAmountInvoice));
+
+        var mockWallet = CreatePayingWallet();
+        var httpClient = BuildHandlerClient(
+            inner, mockWallet.Object, new BudgetController(maxSatsPerRequest: 5000), out var l402Handler);
+
+        var act = () => httpClient.GetAsync("https://example.com/paid-resource");
+
+        await act.Should().ThrowAsync<InvoiceAmountUnknownException>();
         mockWallet.Verify(w => w.PayInvoiceAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         l402Handler.SpendingLog.Count.Should().Be(0);
     }
