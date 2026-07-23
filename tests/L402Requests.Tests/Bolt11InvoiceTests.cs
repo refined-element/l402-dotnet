@@ -164,4 +164,50 @@ public class Bolt11InvoiceTests
         Bolt11Invoice.ClassifyMissingAmount("lnbc221ptest")
             .Should().Be(MissingAmountReason.AmountOutOfRange);
     }
+
+    // ── HRP anchoring (ledger #74) ──
+    //
+    // The amount must be read ONLY from the human-readable part — everything
+    // before the LAST "1" separator. The bech32 data charset excludes "1", so
+    // the final "1" is always the true separator. A decoder that stops at an
+    // EARLIER "1" can lift a small bogus amount out of a crafted stray segment,
+    // report a positive number the invoice does not actually encode, and sail
+    // through a budget check (which the <= 0 guard cannot catch — it is positive).
+
+    [Fact]
+    public void ExtractAmountSats_AmountBeforeLaterSeparator_ReturnsNull()
+    {
+        // First "1" sits right after "9u", so an un-anchored decoder reports
+        // 9u = 900 sats. The real separator is the LAST "1", making the true HRP
+        // "lnbc9u1qpzq" — not a valid amount HRP — so the amount is unknown.
+        Bolt11Invoice.ExtractAmountSats("lnbc9u1qpzq1qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+            .Should().BeNull();
+    }
+
+    [Fact]
+    public void ExtractAmountSats_AmountInsideDataPart_ReturnsNull()
+    {
+        // Reference examples from le-agent-sdk-python's hardened decoder: digits
+        // and a multiplier inside the data part must not be read as the amount.
+        Bolt11Invoice.ExtractAmountSats("lnbc1pabc9u1def").Should().BeNull();
+        Bolt11Invoice.ExtractAmountSats("lnbc1pvjl5p1uez").Should().BeNull();
+    }
+
+    [Fact]
+    public void ClassifyMissingAmount_CraftedDataPartInvoice_NotPriced()
+    {
+        var crafted = "lnbc9u1qpzq1qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        Bolt11Invoice.ExtractAmountSats(crafted).Should().BeNull();
+        Bolt11Invoice.ClassifyMissingAmount(crafted).Should().Be(MissingAmountReason.Unparseable);
+    }
+
+    [Fact]
+    public void ExtractAmountSats_LegitimateInvoices_StillDecodeAfterAnchoring()
+    {
+        // HRP anchoring must not over-reject: normal single-separator invoices,
+        // including amounts whose own digits contain "1", still price correctly.
+        Bolt11Invoice.ExtractAmountSats("lnbc10u1pdata").Should().Be(1_000);
+        Bolt11Invoice.ExtractAmountSats("lnbc1500n1pdata").Should().Be(150);
+        Bolt11Invoice.ExtractAmountSats("lnbc1m1pdata").Should().Be(100_000);
+    }
 }

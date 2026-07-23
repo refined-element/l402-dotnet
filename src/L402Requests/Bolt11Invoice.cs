@@ -33,9 +33,13 @@ public enum MissingAmountReason
 /// </summary>
 public static class Bolt11Invoice
 {
-    // Match: ln + network + optional(amount + optional multiplier) + "1" separator
-    private static readonly Regex Bolt11Pattern = new(
-        @"^ln(?<network>[a-z]+?)(?<amount>\d+)?(?<multiplier>[munp])?1",
+    // Match the WHOLE human-readable part: ln + network + optional(amount +
+    // multiplier). Terminated with "$" (not a trailing "1") so it only ever
+    // matches a complete HRP, never a prefix that stops at an earlier "1". The
+    // HRP is isolated first (HumanReadablePart); anchoring here as well means a
+    // digit sitting in the bech32 data part can never be lifted out as the amount.
+    private static readonly Regex Bolt11HrpPattern = new(
+        @"^ln(?<network>[a-z]+?)(?<amount>\d+)?(?<multiplier>[munp])?$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Dictionary<char, decimal> Multipliers = new()
@@ -48,6 +52,69 @@ public static class Bolt11Invoice
 
     private const decimal SatsPerBtc = 100_000_000m;
 
+    // Why a decode did not yield a usable, strictly-positive sats amount. Shared
+    // by ExtractAmountSats and ClassifyMissingAmount so the two never disagree on
+    // the reason (e.g. a zero amount reported as "too large").
+    private enum DecodeStatus { Ok, Unparseable, NoAmount, NonPositive, OutOfRange }
+
+    /// <summary>
+    /// The BOLT11 human-readable part — everything before the bech32 separator,
+    /// which per BIP-173 is the LAST "1" (the data charset excludes "1", so every
+    /// earlier "1" belongs to the HRP, only ever inside the amount). Isolating the
+    /// HRP with LastIndexOf — rather than letting a regex stop at the FIRST "1" —
+    /// is what stops a digit in the data part being read as the amount (#74).
+    /// </summary>
+    private static string? HumanReadablePart(string bolt11)
+    {
+        var invoice = bolt11.Trim().ToLowerInvariant();
+        var separator = invoice.LastIndexOf('1');
+        return separator < 0 ? null : invoice[..separator];
+    }
+
+    private static (DecodeStatus Status, int Sats) Decode(string bolt11)
+    {
+        if (string.IsNullOrWhiteSpace(bolt11))
+            return (DecodeStatus.Unparseable, 0);
+
+        var hrp = HumanReadablePart(bolt11);
+        if (hrp is null)
+            return (DecodeStatus.Unparseable, 0);
+
+        var match = Bolt11HrpPattern.Match(hrp);
+        if (!match.Success)
+            return (DecodeStatus.Unparseable, 0);
+
+        var amountGroup = match.Groups["amount"];
+        if (!amountGroup.Success)
+            return (DecodeStatus.NoAmount, 0); // "any amount" invoice
+
+        try
+        {
+            var amount = decimal.Parse(amountGroup.Value);
+            var multiplierGroup = match.Groups["multiplier"];
+            var btcAmount = multiplierGroup.Success
+                ? amount * Multipliers[char.ToLowerInvariant(multiplierGroup.Value[0])]
+                : amount; // No multiplier means BTC
+
+            var sats = btcAmount * SatsPerBtc;
+            if (sats > int.MaxValue)
+                return (DecodeStatus.OutOfRange, 0);
+
+            var intSats = (int)sats;
+            // A zero / sub-satoshi amount decodes to <= 0 sats: the invoice pins
+            // no payable amount, so the wallet — not the server — would pick the
+            // spend. Treat it as amountless (unknown), never a 0-sat blank cheque.
+            return intSats > 0 ? (DecodeStatus.Ok, intSats) : (DecodeStatus.NonPositive, 0);
+        }
+        catch (OverflowException)
+        {
+            // Above int.MaxValue sats (~21.47 BTC) the total does not fit, and enough
+            // digits overflow decimal.Parse before that. Either way the amount is one we
+            // cannot state, which is the same position as an amountless invoice.
+            return (DecodeStatus.OutOfRange, 0);
+        }
+    }
+
     /// <summary>
     /// Explain why <see cref="ExtractAmountSats"/> returned null for an invoice.
     /// </summary>
@@ -58,23 +125,15 @@ public static class Bolt11Invoice
     /// </remarks>
     /// <param name="bolt11">The invoice <see cref="ExtractAmountSats"/> could not price.</param>
     /// <returns>Which of the two failure modes applies.</returns>
-    public static MissingAmountReason ClassifyMissingAmount(string bolt11)
+    public static MissingAmountReason ClassifyMissingAmount(string bolt11) => Decode(bolt11).Status switch
     {
-        if (string.IsNullOrWhiteSpace(bolt11))
-            return MissingAmountReason.Unparseable;
-
-        var match = Bolt11Pattern.Match(bolt11.Trim().ToLowerInvariant());
-        if (!match.Success)
-            return MissingAmountReason.Unparseable;
-
-        // The prefix read cleanly. With no amount group there was nothing to price;
-        // with one, ExtractAmountSats only returns null when the value overflows, so
-        // that is the remaining explanation. Deciding it from the match rather than
-        // redoing the arithmetic keeps this in step with ExtractAmountSats.
-        return match.Groups["amount"].Success
-            ? MissingAmountReason.AmountOutOfRange
-            : MissingAmountReason.NoAmountEncoded;
-    }
+        DecodeStatus.OutOfRange => MissingAmountReason.AmountOutOfRange,
+        DecodeStatus.Unparseable => MissingAmountReason.Unparseable,
+        // NoAmount (amountless) and NonPositive (zero / sub-satoshi) both mean the
+        // invoice pins no payable amount — reported together as "no amount encoded"
+        // so a zero invoice is never misdescribed as "too large".
+        _ => MissingAmountReason.NoAmountEncoded,
+    };
 
     /// <summary>
     /// Extract the amount in satoshis from a BOLT11 invoice string.
@@ -86,50 +145,14 @@ public static class Bolt11Invoice
     /// </remarks>
     /// <param name="bolt11">A BOLT11-encoded Lightning invoice (e.g., "lnbc10u1p...").</param>
     /// <returns>
-    /// Amount in satoshis, or null if the amount cannot be determined — none is encoded
-    /// (zero-amount / "any amount" invoices), the invoice cannot be parsed, or the amount
-    /// is too large to represent. Use <see cref="ClassifyMissingAmount"/> to tell those apart.
+    /// Amount in satoshis (strictly positive), or null if it cannot be determined — none is
+    /// encoded ("any amount" invoices), it is non-positive (a zero / sub-satoshi amount, which
+    /// the payer would otherwise pick), the invoice cannot be parsed, or the amount is too large
+    /// to represent. Use <see cref="ClassifyMissingAmount"/> to tell those apart.
     /// </returns>
     public static int? ExtractAmountSats(string bolt11)
     {
-        if (string.IsNullOrWhiteSpace(bolt11))
-            return null;
-
-        var invoice = bolt11.Trim().ToLowerInvariant();
-        var match = Bolt11Pattern.Match(invoice);
-        if (!match.Success)
-            return null;
-
-        var amountGroup = match.Groups["amount"];
-        if (!amountGroup.Success)
-            return null; // "any amount" invoice
-
-        try
-        {
-            var amount = decimal.Parse(amountGroup.Value);
-            var multiplierGroup = match.Groups["multiplier"];
-
-            decimal btcAmount;
-            if (multiplierGroup.Success)
-            {
-                var multiplierChar = char.ToLowerInvariant(multiplierGroup.Value[0]);
-                btcAmount = amount * Multipliers[multiplierChar];
-            }
-            else
-            {
-                btcAmount = amount; // No multiplier means BTC
-            }
-
-            return (int)(btcAmount * SatsPerBtc);
-        }
-        catch (OverflowException)
-        {
-            // Above int.MaxValue sats (~21.47 BTC) the total does not fit, and enough
-            // digits overflow decimal.Parse before that. Either way the amount is one we
-            // cannot state, which is the same position as an amountless invoice: return
-            // null so it takes the refusal path instead of throwing OverflowException out
-            // of the caller's send, past every documented L402Exception.
-            return null;
-        }
+        var (status, sats) = Decode(bolt11);
+        return status == DecodeStatus.Ok ? sats : null;
     }
 }
