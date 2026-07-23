@@ -1,0 +1,50 @@
+name: CI
+
+# Gates code BEFORE it can merge to main. A push to main that changes
+# src/L402Requests/L402Requests.csproj auto-publishes to NuGet
+# (publish-nuget.yml) with no other test gate in front of it, so every PR
+# must pass this first. Adding/editing this file does NOT change that csproj,
+# so it never triggers a publish.
+#
+# Runs the self-contained xUnit suite: no database, secrets, or network
+# required. Targets net8.0 (matches the csproj TargetFramework).
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+# One in-flight run per branch/PR; newer pushes cancel stale runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --verbosity normal
