@@ -74,11 +74,30 @@ public sealed class L402DelegatingHandler : DelegatingHandler
             throw new InvoiceAmountUnknownException(
                 Bolt11Invoice.ClassifyMissingAmount(challenge.Invoice), challenge.Invoice);
 
-        _budget?.Check(amountSats.Value, domain);
+        // Reserve budget atomically BEFORE paying. TryReserve evaluates the domain
+        // allowlist and the per-request/hour/day caps under one lock, counting other
+        // in-flight reservations, and records this spend as reserved — so two concurrent
+        // payments cannot both pass a check against the same pre-payment total and both
+        // settle (the check-then-pay-then-record TOCTOU). Refusal throws, as Check did.
+        // Budget is reserved before the wallet-capability check so an over-budget request
+        // is refused with BudgetExceededException regardless of the wallet.
+        long? reservationId = _budget?.TryReserve(amountSats.Value, domain);
 
         // Pay the invoice
-        var wallet = GetWallet();
-        L402HttpClient.RejectWalletWithoutPreimage(wallet);
+        IWallet wallet;
+        try
+        {
+            wallet = GetWallet();
+            L402HttpClient.RejectWalletWithoutPreimage(wallet);
+        }
+        catch
+        {
+            // Release the reservation if the wallet can't be used — no funds moved.
+            if (reservationId.HasValue)
+                _budget?.Release(reservationId.Value);
+            throw;
+        }
+
         string preimage;
         try
         {
@@ -86,6 +105,9 @@ public sealed class L402DelegatingHandler : DelegatingHandler
         }
         catch (Exception e)
         {
+            // Payment failed: release the reservation so it doesn't hold budget forever.
+            if (reservationId.HasValue)
+                _budget?.Release(reservationId.Value);
             SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, "", success: false, macaroon: challengeMacaroon);
 
             if (e is L402Exception)
@@ -93,9 +115,13 @@ public sealed class L402DelegatingHandler : DelegatingHandler
             throw new PaymentFailedException(e.Message, challenge.Invoice);
         }
 
-        // Record successful payment. amountSats is always known by this point — unknown
-        // amounts were refused above — so every payment lands in the budget and the log.
-        _budget?.RecordPayment(amountSats.Value);
+        // Commit the reserved spend into the budget window. amountSats is always known by
+        // this point — unknown amounts were refused above — so every payment lands in the
+        // budget and the log. The wallet returns only the preimage; routing fees are not
+        // surfaced by IWallet.PayInvoiceAsync, so we commit the invoice principal. If a
+        // wallet later exposes the paid fee, add it to the committed amount here.
+        if (reservationId.HasValue)
+            _budget?.Commit(reservationId.Value, amountSats.Value);
         SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
 
         // Cache the credential and use the returned credential directly for the retry header.
