@@ -107,8 +107,12 @@ public sealed class BudgetController
     {
         lock (_lock)
         {
-            _reservations.Remove(reservationId);
-            _payments.Enqueue((DateTimeOffset.UtcNow, actualAmountSats));
+            // Idempotent (matches Release and the doc contract): only record spend if this
+            // reservation was still live. A double-commit, or a commit of an already-released
+            // or unknown id, must NOT enqueue a phantom spend that would over-count the
+            // window and shrink available budget.
+            if (_reservations.Remove(reservationId))
+                _payments.Enqueue((DateTimeOffset.UtcNow, actualAmountSats));
         }
     }
 

@@ -128,6 +128,24 @@ public class BudgetConcurrencyTests
         handler.PaidResponses.Should().Be(1);
     }
 
+    [Fact]
+    public void Commit_IsIdempotent_DoubleCommitOrUnknownIdDoesNotDoubleCountSpend()
+    {
+        // Commit must record spend exactly once for a live reservation and be a no-op for
+        // an already-resolved or unknown id — otherwise a double-commit enqueues a phantom
+        // spend that over-counts the window and shrinks available budget.
+        var budget = new BudgetController(
+            maxSatsPerRequest: 1000, maxSatsPerHour: 10_000, maxSatsPerDay: 1_000_000);
+
+        var id = budget.TryReserve(1000);
+        budget.Commit(id, 1000);
+        budget.Commit(id, 1000);      // same id again — reservation already resolved
+        budget.Commit(999_999, 1000); // never-reserved id
+
+        budget.SpentLastHour().Should().Be(1000,
+            "a committed reservation records its spend exactly once, regardless of repeat/unknown commits");
+    }
+
     private sealed record Attempt(bool Ok, bool Denied);
 
     private static async Task<Attempt> AttemptAsync(L402HttpClient client, string url)
