@@ -15,6 +15,14 @@ public sealed class BudgetController
     private readonly ConcurrentQueue<(DateTimeOffset Timestamp, int AmountSats)> _payments = new();
     private readonly object _lock = new();
 
+    // In-flight reservations: id -> reserved sats. A reservation is a spend that has
+    // passed the caps and is committed-in-intent but not yet settled (the wallet call is
+    // still outstanding). It counts fully against the hour/day caps so two concurrent
+    // payments cannot both pass a check against the same pre-payment total. Guarded by
+    // _lock, together with the window evaluation, so evaluate+reserve is atomic.
+    private readonly Dictionary<long, int> _reservations = new();
+    private long _nextReservationId;
+
     public BudgetController(
         int maxSatsPerRequest = 1_000,
         int maxSatsPerHour = 10_000,
@@ -37,9 +45,104 @@ public sealed class BudgetController
     /// <summary>
     /// Verify a payment is within budget. Throws if not.
     /// </summary>
+    /// <remarks>
+    /// Read-only preview: it does NOT hold a slot. Prefer the reserve/commit lifecycle
+    /// (<see cref="TryReserve"/> → <see cref="Commit"/>/<see cref="Release"/>) around an
+    /// actual payment — Check followed by a later record is a check-then-pay-then-record
+    /// TOCTOU race under concurrency, because the lock is released before the payment and
+    /// the spend is recorded only afterwards. Kept for backward compatibility.
+    /// </remarks>
     /// <param name="amountSats">The invoice amount in satoshis.</param>
     /// <param name="domain">The domain the request is going to.</param>
     public void Check(int amountSats, string? domain = null)
+    {
+        ValidateDomainAndPerRequest(amountSats, domain);
+
+        var now = DateTimeOffset.UtcNow;
+        lock (_lock)
+        {
+            Prune(now);
+            EnforceWindowLimits(now, amountSats);
+        }
+    }
+
+    /// <summary>
+    /// Atomically reserve budget for a payment about to be made. Evaluates the domain
+    /// allowlist and the per-request / hourly / daily caps — counting other in-flight
+    /// reservations — under a single lock, and, if within limits, records a reservation
+    /// and returns its id. Throws (same exceptions as <see cref="Check"/>) if refused.
+    /// </summary>
+    /// <remarks>
+    /// This is the enforcement path. Because the evaluation and the reservation happen
+    /// together under one lock, two concurrent reservations cannot both pass against the
+    /// same pre-payment total. The caller pays OUTSIDE the lock, then calls
+    /// <see cref="Commit"/> on success or <see cref="Release"/> on failure. A reservation
+    /// counts fully against the hourly and daily windows until committed or released.
+    /// </remarks>
+    /// <param name="amountSats">The invoice amount in satoshis.</param>
+    /// <param name="domain">The domain the request is going to.</param>
+    /// <returns>A reservation id to pass to <see cref="Commit"/> or <see cref="Release"/>.</returns>
+    public long TryReserve(int amountSats, string? domain = null)
+    {
+        ValidateDomainAndPerRequest(amountSats, domain);
+
+        var now = DateTimeOffset.UtcNow;
+        lock (_lock)
+        {
+            Prune(now);
+            EnforceWindowLimits(now, amountSats);
+
+            var id = ++_nextReservationId;
+            _reservations[id] = amountSats;
+            return id;
+        }
+    }
+
+    /// <summary>
+    /// Commit a reservation: record the settled spend into the budget window and drop the
+    /// reservation. Pass the actual amount paid (principal, plus routing fee if the wallet
+    /// surfaces one). No-op if the id is unknown (already committed/released).
+    /// </summary>
+    public void Commit(long reservationId, int actualAmountSats)
+    {
+        lock (_lock)
+        {
+            // Idempotent (matches Release and the doc contract): only record spend if this
+            // reservation was still live. A double-commit, or a commit of an already-released
+            // or unknown id, must NOT enqueue a phantom spend that would over-count the
+            // window and shrink available budget.
+            if (_reservations.Remove(reservationId))
+                _payments.Enqueue((DateTimeOffset.UtcNow, actualAmountSats));
+        }
+    }
+
+    /// <summary>
+    /// Release a reservation with no spend (payment failed or was not attempted), freeing
+    /// the reserved budget. No-op if the id is unknown (already committed/released).
+    /// </summary>
+    public void Release(long reservationId)
+    {
+        lock (_lock)
+        {
+            _reservations.Remove(reservationId);
+        }
+    }
+
+    /// <summary>
+    /// Record a successful payment against the budget.
+    /// </summary>
+    /// <remarks>
+    /// Kept for backward compatibility. New code should use the reserve/commit lifecycle
+    /// so the spend is reserved atomically before the wallet call rather than recorded
+    /// after it (see <see cref="Check"/> remarks for the race this avoids).
+    /// </remarks>
+    public void RecordPayment(int amountSats)
+    {
+        _payments.Enqueue((DateTimeOffset.UtcNow, amountSats));
+    }
+
+    /// <summary>Domain allowlist + per-request checks. No lock needed (immutable inputs).</summary>
+    private void ValidateDomainAndPerRequest(int amountSats, string? domain)
     {
         // Domain allowlist check
         if (_allowedDomains is not null && !string.IsNullOrEmpty(domain))
@@ -51,33 +154,35 @@ public sealed class BudgetController
         // Per-request limit
         if (amountSats > _maxSatsPerRequest)
             throw new BudgetExceededException("per_request", _maxSatsPerRequest, 0, amountSats);
-
-        var now = DateTimeOffset.UtcNow;
-
-        lock (_lock)
-        {
-            Prune(now);
-
-            // Hourly limit
-            var hourAgo = now.AddHours(-1);
-            var spentHour = GetSpentSince(hourAgo);
-            if (spentHour + amountSats > _maxSatsPerHour)
-                throw new BudgetExceededException("per_hour", _maxSatsPerHour, spentHour, amountSats);
-
-            // Daily limit
-            var dayAgo = now.AddDays(-1);
-            var spentDay = GetSpentSince(dayAgo);
-            if (spentDay + amountSats > _maxSatsPerDay)
-                throw new BudgetExceededException("per_day", _maxSatsPerDay, spentDay, amountSats);
-        }
     }
 
     /// <summary>
-    /// Record a successful payment against the budget.
+    /// Enforce the hourly/daily windows, counting settled spend AND in-flight reservations.
+    /// Must be called while holding <see cref="_lock"/>.
     /// </summary>
-    public void RecordPayment(int amountSats)
+    private void EnforceWindowLimits(DateTimeOffset now, int amountSats)
     {
-        _payments.Enqueue((DateTimeOffset.UtcNow, amountSats));
+        var reserved = SumReservations();
+
+        // Hourly limit
+        var hourAgo = now.AddHours(-1);
+        var spentHour = GetSpentSince(hourAgo) + reserved;
+        if (spentHour + amountSats > _maxSatsPerHour)
+            throw new BudgetExceededException("per_hour", _maxSatsPerHour, spentHour, amountSats);
+
+        // Daily limit
+        var dayAgo = now.AddDays(-1);
+        var spentDay = GetSpentSince(dayAgo) + reserved;
+        if (spentDay + amountSats > _maxSatsPerDay)
+            throw new BudgetExceededException("per_day", _maxSatsPerDay, spentDay, amountSats);
+    }
+
+    private int SumReservations()
+    {
+        var total = 0;
+        foreach (var amt in _reservations.Values)
+            total += amt;
+        return total;
     }
 
     /// <summary>Total sats spent in the last hour.</summary>
