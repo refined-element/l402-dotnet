@@ -92,7 +92,7 @@ public sealed class NwcWallet : IWallet, IDisposable
     };
 
     private readonly string _walletPubkey;        // wallet x-only pubkey (hex)
-    private readonly string _relay;
+    private readonly string[] _relays;            // advertised relays, in order (>= 1, all valid ws/wss)
     private readonly byte[] _secretBytes;         // client secret (32-byte scalar)
     private readonly ECPrivKey _privateKey;       // client private key
     private readonly string _myPubkeyHex;         // client x-only pubkey (hex)
@@ -130,8 +130,14 @@ public sealed class NwcWallet : IWallet, IDisposable
     /// <summary>Configured outbound encryption mode ("auto" | "nip04" | "nip44_v2").</summary>
     internal string ConfiguredEncryption => _encryption;
 
-    /// <summary>The single relay URL selected from the connection string (test seam).</summary>
-    internal string Relay => _relay;
+    /// <summary>The first advertised relay URL from the connection string (test seam).</summary>
+    internal string Relay => _relays[0];
+
+    /// <summary>
+    /// All advertised relay URLs, in connection-string order (test seam). A getalby.com-style
+    /// wallet lists two for redundancy; the connect sites fail over across them.
+    /// </summary>
+    internal IReadOnlyList<string> Relays => _relays;
 
     /// <param name="connectionString">nostr+walletconnect:// URI.</param>
     /// <param name="timeout">Per-pay receive timeout. Defaults to 60s.</param>
@@ -170,12 +176,27 @@ public sealed class NwcWallet : IWallet, IDisposable
 
         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
         // A NWC connection string may advertise MULTIPLE relay= params (getalby.com wallets list
-        // two: relay.getalby.com + relay2.getalby.com). NameValueCollection's indexer comma-JOINS
-        // duplicate keys into one invalid string ("wss://a,wss://b"), which new Uri(...) rejects —
-        // breaking every pay via such a wallet. Take the first individual relay value instead.
-        // (Only the first relay is used; multi-relay failover would be a future enhancement.)
-        _relay = query.GetValues("relay")?.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r))
-            ?? throw new ArgumentException("NWC connection string missing relay URL");
+        // two: relay.getalby.com + relay2.getalby.com) FOR redundancy. NameValueCollection's
+        // indexer comma-JOINS duplicate keys into one invalid string ("wss://a,wss://b"), which
+        // new Uri(...) rejects — so use GetValues (each param stays a separate entry) and keep the
+        // FULL list so PayInvoiceAsync and the INFO-event fetch can fail over from one relay to the
+        // next on a connect error.
+        var advertisedRelays = query.GetValues("relay")
+            ?.Where(r => !string.IsNullOrWhiteSpace(r))
+            .Select(r => r.Trim())
+            .ToArray();
+        if (advertisedRelays is null || advertisedRelays.Length == 0)
+            throw new ArgumentException("NWC connection string missing relay URL");
+
+        // Up-front relay-URI validation, consistent with the pubkey/secret checks below: at least
+        // one advertised relay must be a well-formed absolute ws:// or wss:// URI. A relay with no
+        // scheme, the wrong scheme, or a comma-joined value ("wss://a,wss://b") is rejected here at
+        // construction rather than failing late at ConnectAsync. Only the valid relays are kept.
+        _relays = advertisedRelays.Where(IsValidRelayUri).ToArray();
+        if (_relays.Length == 0)
+            throw new ArgumentException(
+                "NWC connection string relay URL is not a valid ws:// or wss:// URI");
+
         var secret = query["secret"] ?? throw new ArgumentException("NWC connection string missing secret");
 
         if (string.IsNullOrEmpty(_walletPubkey))
@@ -218,6 +239,56 @@ public sealed class NwcWallet : IWallet, IDisposable
         _myPubkeyHex = Convert.ToHexString(privKey.CreateXOnlyPubKey().ToBytes()).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// True when <paramref name="relay"/> is a well-formed absolute <c>ws://</c> or <c>wss://</c>
+    /// URI with a host. Rejects a missing/wrong scheme and a comma-joined value ("wss://a,wss://b")
+    /// — a real relay URL never contains a comma, and Uri parsing would otherwise mis-accept it.
+    /// </summary>
+    private static bool IsValidRelayUri(string relay) =>
+        !relay.Contains(',')
+        && Uri.TryCreate(relay, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeWs || uri.Scheme == Uri.UriSchemeWss)
+        && !string.IsNullOrEmpty(uri.Host);
+
+    /// <summary>
+    /// Opens a <see cref="ClientWebSocket"/> to the first reachable advertised relay, trying each
+    /// relay in <see cref="_relays"/> order. A connect failure (relay unreachable / socket error)
+    /// fails over to the next relay; the last failure is rethrown only once every relay is
+    /// exhausted — so the single-relay case keeps its original throw-on-failure behaviour, and the
+    /// multi-relay case surfaces a real error (PayInvoiceAsync lets it propagate; the INFO-event
+    /// fetch catches it and falls back to NIP-04). Caller cancellation propagates immediately
+    /// rather than being treated as a relay failure. The caller owns disposing the returned socket.
+    /// </summary>
+    private static async Task<ClientWebSocket> ConnectToFirstReachableRelayAsync(
+        IReadOnlyList<string> relays, CancellationToken ct)
+    {
+        Exception? lastError = null;
+        foreach (var relay in relays)
+        {
+            ct.ThrowIfCancellationRequested();
+            var ws = new ClientWebSocket();
+            try
+            {
+                await ws.ConnectAsync(new Uri(relay), ct).ConfigureAwait(false);
+                return ws;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                ws.Dispose();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Unreachable relay — dispose the half-open socket and fail over to the next.
+                ws.Dispose();
+                lastError = ex;
+            }
+        }
+
+        // Every advertised relay refused the connection.
+        throw lastError ?? new InvalidOperationException("NWC connection string missing relay URL");
+    }
+
     public async Task<string> PayInvoiceAsync(string bolt11, CancellationToken ct = default)
     {
         // Resolve the outbound encryption scheme. "auto" (the default) fetches the wallet's
@@ -233,8 +304,8 @@ public sealed class NwcWallet : IWallet, IDisposable
         var (nostrEvent, createdAt) = BuildPayInvoiceRequest(bolt11, effectiveEncryption);
         var eventId = nostrEvent["id"]!.GetValue<string>();
 
-        using var ws = new ClientWebSocket();
-        await ws.ConnectAsync(new Uri(_relay), ct);
+        // Connect to the first reachable relay, failing over across the advertised list.
+        using var ws = await ConnectToFirstReachableRelayAsync(_relays, ct);
 
         try
         {
@@ -543,13 +614,14 @@ public sealed class NwcWallet : IWallet, IDisposable
     {
         Interlocked.Increment(ref InfoEventFetchCount);
 
-        using var ws = new ClientWebSocket();
+        ClientWebSocket? ws = null;
         try
         {
             using var timeout = new CancellationTokenSource(AutoResolveTimeout);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
-            await ws.ConnectAsync(new Uri(_relay), linked.Token).ConfigureAwait(false);
+            // Connect to the first reachable relay, failing over across the advertised list.
+            ws = await ConnectToFirstReachableRelayAsync(_relays, linked.Token).ConfigureAwait(false);
 
             var subId = Guid.NewGuid().ToString("N")[..16];
             var reqMessage = new JsonArray
@@ -635,14 +707,21 @@ public sealed class NwcWallet : IWallet, IDisposable
         }
         finally
         {
-            if (ws.State == WebSocketState.Open)
+            // ws is created (and owned) here via the connect helper rather than a `using`, so
+            // dispose it explicitly after a best-effort graceful close. Null when every relay
+            // was unreachable (the helper threw before returning a socket).
+            if (ws != null)
             {
-                try
+                if (ws.State == WebSocketState.Open)
                 {
-                    using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                    await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, closeCts.Token).ConfigureAwait(false);
+                    try
+                    {
+                        using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                        await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, closeCts.Token).ConfigureAwait(false);
+                    }
+                    catch { ws.Abort(); }
                 }
-                catch { ws.Abort(); }
+                ws.Dispose();
             }
         }
     }
