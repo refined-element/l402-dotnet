@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1
+
+**Bug fix — NWC multi-relay wallets.** A Nostr Wallet Connect (NWC) connection string that advertises more than one relay (e.g. Alby Hub lists two `relay=` params for redundancy) was mishandled: the relay URLs were comma-joined into a single invalid URI (`wss://a,wss://b`), so `PayInvoiceAsync` threw a `UriFormatException` and no payment could be made. The client now:
+
+- Parses **all** advertised `relay=` params and validates each is a well-formed `ws://`/`wss://` URI up front — a comma-joined or scheme-less value is rejected at construction with a clear message, not late at connect time.
+- **Fails over across relays** at connect: it tries each advertised relay in order and only surfaces an error once every relay is unreachable. Single-relay behavior is byte-for-byte unchanged.
+
+## 0.8.0
+
+**Funds-safety — atomic budget reservations.** Closed a check-then-pay TOCTOU race in the budget controller: two concurrent payments could each pass the spend check against the same remaining balance and then both pay, together exceeding the configured cap. Spending is now reserved atomically before the wallet call and committed (idempotently) or released afterward, so concurrent invocations can never collectively overspend the budget.
+
 ## 0.7.1
 
 **Security fix — upgrade recommended.** Completes 0.7.0's "refuse an invoice whose amount can't be positively bounded" guarantee by closing two remaining ways an unbounded or ambiguous invoice could still be paid:
