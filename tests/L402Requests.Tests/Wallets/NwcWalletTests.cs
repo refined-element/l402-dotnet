@@ -805,6 +805,25 @@ public class NwcWalletTests
     #region Connection-string validation (consistent ArgumentException contract)
 
     [Fact]
+    public void Constructor_MultipleRelayParams_SelectsTheFirstValidRelayNotAJoinedInvalidUri()
+    {
+        // getalby.com-style NWC strings advertise TWO relays. HttpUtility.ParseQueryString's
+        // indexer comma-JOINS duplicate keys, so query["relay"] would return
+        // "wss://relay.getalby.com,wss://relay2.getalby.com" — an invalid URI that new Uri(...)
+        // rejects, breaking every pay via such a wallet. The relay must resolve to a single
+        // valid URL (the first).
+        var connStr =
+            "nostr+walletconnect://" + ValidWalletPubkeyHex +
+            "?relay=wss://relay.getalby.com&relay=wss://relay2.getalby.com&secret=" + ValidClientSecretHex;
+
+        var wallet = new NwcWallet(connStr);
+
+        wallet.Relay.Should().Be("wss://relay.getalby.com");
+        var act = () => new Uri(wallet.Relay);
+        act.Should().NotThrow("the selected relay must be a single, well-formed URI");
+    }
+
+    [Fact]
     public void Constructor_MalformedWalletPubkey_ThrowsArgumentException()
     {
         // A non-hex wallet pubkey makes Convert.FromHexString throw FormatException.
