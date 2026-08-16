@@ -130,6 +130,9 @@ public sealed class NwcWallet : IWallet, IDisposable
     /// <summary>Configured outbound encryption mode ("auto" | "nip04" | "nip44_v2").</summary>
     internal string ConfiguredEncryption => _encryption;
 
+    /// <summary>The single relay URL selected from the connection string (test seam).</summary>
+    internal string Relay => _relay;
+
     /// <param name="connectionString">nostr+walletconnect:// URI.</param>
     /// <param name="timeout">Per-pay receive timeout. Defaults to 60s.</param>
     /// <param name="encryption">
@@ -166,7 +169,13 @@ public sealed class NwcWallet : IWallet, IDisposable
         _walletPubkey = uri.Host;
 
         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
-        _relay = query["relay"] ?? throw new ArgumentException("NWC connection string missing relay URL");
+        // A NWC connection string may advertise MULTIPLE relay= params (getalby.com wallets list
+        // two: relay.getalby.com + relay2.getalby.com). NameValueCollection's indexer comma-JOINS
+        // duplicate keys into one invalid string ("wss://a,wss://b"), which new Uri(...) rejects —
+        // breaking every pay via such a wallet. Take the first individual relay value instead.
+        // (Only the first relay is used; multi-relay failover would be a future enhancement.)
+        _relay = query.GetValues("relay")?.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r))
+            ?? throw new ArgumentException("NWC connection string missing relay URL");
         var secret = query["secret"] ?? throw new ArgumentException("NWC connection string missing secret");
 
         if (string.IsNullOrEmpty(_walletPubkey))
