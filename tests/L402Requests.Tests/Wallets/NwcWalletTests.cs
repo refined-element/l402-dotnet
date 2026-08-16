@@ -71,6 +71,18 @@ public class NwcWalletTests
         return (privKey, pubKey.ToBytes());
     }
 
+    // Returns a loopback ws:// URL on a just-released ephemeral port. Nothing is listening
+    // there, so a ClientWebSocket connect gets "connection refused" fast — used to model an
+    // unreachable relay in the failover test.
+    private static string FreeLoopbackWsUrl()
+    {
+        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        l.Start();
+        var port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+        l.Stop();
+        return $"ws://127.0.0.1:{port}/";
+    }
+
     // Builds a fully-signed kind-23195 (NIP-47 response) event using the same
     // canonical serialisation NwcWallet.ComputeEventId uses, so a genuine event
     // verifies and any post-sign tamper breaks verification.
@@ -800,27 +812,144 @@ public class NwcWalletTests
             .Which.Should().NotBeOfType<JsonException>();
     }
 
+    [Fact]
+    public async Task PayInvoiceAsync_MultiRelayFirstRelayWorking_ReturnsPreimage()
+    {
+        // A two-relay (getalby-style) connection string whose FIRST relay is the working mock.
+        // The pay must connect to the first relay and return the preimage — the second relay
+        // (a valid-but-unused wss:// URI) is never contacted.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "aabb00112233445566778899ccddeeffaabb00112233445566778899ccddeeff";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage);
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&relay=wss://relay2.example.com&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(10));
+
+        var result = await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+
+        result.Should().Be(preimage);
+    }
+
+    [Fact]
+    public async Task PayInvoiceAsync_FirstRelayUnreachable_FailsOverToSecondRelay_AndPays()
+    {
+        // Relay failover: the FIRST advertised relay is a dead loopback port (connection
+        // refused); the SECOND is the working mock. Both connect sites (INFO fetch + pay)
+        // must skip the dead relay and succeed via the second — proving multi-relay
+        // redundancy, not just first-relay use.
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+
+        var preimage = "ccddeeff00112233445566778899aabbccddeeff00112233445566778899aabb";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage);
+        await relay.StartAsync();
+
+        var deadRelayUrl = FreeLoopbackWsUrl(); // nothing is listening → connect refused fast
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + deadRelayUrl + "&relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(10));
+
+        var result = await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+
+        result.Should().Be(preimage,
+            "a connect failure on the first relay must fail over to the second (working) relay");
+    }
+
     #endregion
 
     #region Connection-string validation (consistent ArgumentException contract)
 
     [Fact]
-    public void Constructor_MultipleRelayParams_SelectsTheFirstValidRelayNotAJoinedInvalidUri()
+    public void Constructor_MultipleRelayParams_RetainsAllRelaysInOrderForFailover()
     {
-        // getalby.com-style NWC strings advertise TWO relays. HttpUtility.ParseQueryString's
-        // indexer comma-JOINS duplicate keys, so query["relay"] would return
-        // "wss://relay.getalby.com,wss://relay2.getalby.com" — an invalid URI that new Uri(...)
-        // rejects, breaking every pay via such a wallet. The relay must resolve to a single
-        // valid URL (the first).
+        // getalby.com-style NWC strings advertise TWO relays FOR redundancy. HttpUtility
+        // .ParseQueryString's indexer comma-JOINS duplicate keys, so query["relay"] would return
+        // "wss://relay.getalby.com,wss://relay2.getalby.com" — an invalid URI. Using GetValues
+        // keeps each param a separate, well-formed entry; ALL are retained (in order) so the
+        // connect sites can fail over from the first relay to the next.
         var connStr =
             "nostr+walletconnect://" + ValidWalletPubkeyHex +
             "?relay=wss://relay.getalby.com&relay=wss://relay2.getalby.com&secret=" + ValidClientSecretHex;
 
         var wallet = new NwcWallet(connStr);
 
-        wallet.Relay.Should().Be("wss://relay.getalby.com");
+        wallet.Relays.Should().Equal(
+            new[] { "wss://relay.getalby.com", "wss://relay2.getalby.com" },
+            "both advertised relays must be retained in order for failover");
+        wallet.Relay.Should().Be("wss://relay.getalby.com", "the first relay is the primary");
         var act = () => new Uri(wallet.Relay);
-        act.Should().NotThrow("the selected relay must be a single, well-formed URI");
+        act.Should().NotThrow("each retained relay must be a single, well-formed URI");
+    }
+
+    [Fact]
+    public void Constructor_PercentEncodedRelayParams_DecodesAndSelectsFirstRelay()
+    {
+        // Real getalby.com wallets send the relay params PERCENT-ENCODED on the wire, e.g.
+        // relay=wss%3A%2F%2Frelay.getalby.com. HttpUtility.ParseQueryString decodes them, so
+        // the first relay must resolve to the decoded, well-formed wss:// URI.
+        var connStr =
+            "nostr+walletconnect://" + ValidWalletPubkeyHex +
+            "?relay=wss%3A%2F%2Frelay.getalby.com&relay=wss%3A%2F%2Frelay2.getalby.com&secret=" +
+            ValidClientSecretHex;
+
+        var wallet = new NwcWallet(connStr);
+
+        wallet.Relay.Should().Be("wss://relay.getalby.com",
+            "the percent-encoded first relay must decode to a well-formed wss:// URI");
+        var act = () => new Uri(wallet.Relay);
+        act.Should().NotThrow();
+    }
+
+    [Fact]
+    public void Constructor_RelayWithoutScheme_ThrowsArgumentException()
+    {
+        // A relay value with no scheme ("relay.getalby.com") is not an absolute ws/wss URI.
+        // It must be rejected up front — matching the pubkey/secret validation contract —
+        // rather than slipping through construction and only failing late at ConnectAsync.
+        var connStr =
+            "nostr+walletconnect://" + ValidWalletPubkeyHex +
+            "?relay=relay.getalby.com&secret=" + ValidClientSecretHex;
+
+        var act = () => new NwcWallet(connStr);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*relay*");
+    }
+
+    [Fact]
+    public void Constructor_RelayWithWrongScheme_ThrowsArgumentException()
+    {
+        // http:// is not a Nostr relay scheme. Only ws:// / wss:// are valid; reject up front.
+        var connStr =
+            "nostr+walletconnect://" + ValidWalletPubkeyHex +
+            "?relay=http://relay.getalby.com&secret=" + ValidClientSecretHex;
+
+        var act = () => new NwcWallet(connStr);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*relay*");
+    }
+
+    [Fact]
+    public void Constructor_CommaJoinedSingleRelayValue_ThrowsArgumentException()
+    {
+        // A single relay param whose value is itself a comma-joined pair ("wss://a,wss://b")
+        // is exactly the invalid URI the original comma-join bug produced. It is not a single
+        // well-formed relay and must not pass construction (it must fail here, not late).
+        var connStr =
+            "nostr+walletconnect://" + ValidWalletPubkeyHex +
+            "?relay=wss://relay.getalby.com,wss://relay2.getalby.com&secret=" + ValidClientSecretHex;
+
+        var act = () => new NwcWallet(connStr);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*relay*");
     }
 
     [Fact]
