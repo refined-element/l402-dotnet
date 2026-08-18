@@ -7,7 +7,8 @@ name: CI
 # so it never triggers a publish.
 #
 # Runs the self-contained xUnit suite: no database, secrets, or network
-# required. Targets net8.0 (matches the csproj TargetFramework).
+# required. The .NET 10 SDK builds both the net8.0 and net10.0 targets
+# (matches the csproj TargetFrameworks).
 on:
   pull_request:
   push:
@@ -21,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOTNET_VERSION: '8.0.x'
+  DOTNET_VERSION: '10.0.x'
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
