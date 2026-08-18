@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0
+
+**.NET 10 support.** The package now multi-targets `net8.0;net10.0`, adding a first-class `net10.0` (current LTS) target. The `net8.0` target is unchanged — same code, same dependency version floors (`Microsoft.Extensions.Http` 8.0.1, `Microsoft.Extensions.DependencyInjection.Abstractions` 8.0.2), so existing .NET 8 consumers see no behavioral or dependency change.
+
 ## 0.8.1
 
 **Bug fix — NWC multi-relay wallets.** A Nostr Wallet Connect (NWC) connection string that advertises more than one relay (e.g. Alby Hub lists two `relay=` params for redundancy) was mishandled: the relay URLs were comma-joined into a single invalid URI (`wss://a,wss://b`), so `PayInvoiceAsync` threw a `UriFormatException` and no payment could be made. The client now:
