@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.0
+
+**MPP draft-00 client support.** Adds the modern `Payment` challenge profile from draft-httpauth-payment-00 + draft-lightning-charge-00 (paymentauth.org), alongside — not replacing — the existing legacy `Payment` profile and classic L402/LSAT handling, which are unchanged.
+
+- **Modern challenge parsing** (`ModernPaymentChallenge`): `Payment id=..., realm=..., method="lightning", intent="charge", request="<base64url(JSON)>", expires=...` with optional `digest`/`description`/`opaque`. The base64url `request` payload is decoded (padded or unpadded) for the invoice, amount (sats), currency, payment hash, and network. Unknown params are ignored per RFC 9110, so a superset header that also carries legacy `invoice=`/`amount=`/`currency=` params parses as modern; a *malformed* modern challenge is never silently retried as legacy unless that same header carries the legacy `invoice=` fallback.
+- **Precedence:** L402 is still preferred over `Payment` (unchanged); among `Payment` challenges, modern (has `request=`) is preferred over legacy.
+- **Modern credential on retry:** `Authorization: Payment <base64url(JSON, no padding)>` echoing every received challenge param byte-exact (the encoded `request` string is never re-encoded) plus `payload.preimage` in lowercase hex. Modern credentials are **single-use server-side and are never cached** — each request pays a fresh challenge. L402/legacy credential caching is unchanged.
+- **Client-side sanity checks before paying:** `method` must be `lightning`, `intent` must be `charge`, `currency` (when present) must be `sat`, and an already-expired challenge is refused with the new `ChallengeExpiredException` before any funds move.
+- **Payment-Receipt:** the draft-00 `Payment-Receipt` response header is parsed tolerantly (`PaymentReceipt`, no secrets — it carries the payment hash, not the preimage) and exposed on the spending log record (`PaymentRecord.Receipt`). An absent or malformed receipt never fails a successful payment.
+- Requests now advertise `Accept-Payment: lightning/charge`.
+
+Both surfaces (`L402HttpClient` and `L402DelegatingHandler`) get the full flow.
+
 ## 0.9.0
 
 **.NET 10 support.** The package now multi-targets `net8.0;net10.0`, adding a first-class `net10.0` (current LTS) target. The `net8.0` target is unchanged — same code, same dependency version floors (`Microsoft.Extensions.Http` 8.0.1, `Microsoft.Extensions.DependencyInjection.Abstractions` 8.0.2), so existing .NET 8 consumers see no behavioral or dependency change.

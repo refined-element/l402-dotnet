@@ -71,6 +71,11 @@ public sealed class L402HttpClient : IDisposable
         var url = request.RequestUri?.ToString() ?? throw new ArgumentException("Request must have a URI");
         var uri = request.RequestUri!;
 
+        // Advertise draft-00 Payment support (optional per the spec; servers
+        // that don't know the header ignore it).
+        if (!request.Headers.Contains("Accept-Payment"))
+            request.Headers.TryAddWithoutValidation("Accept-Payment", "lightning/charge");
+
         // Try cached credential first
         var cachedCred = _cache.Get(uri.Host, uri.AbsolutePath);
         if (cachedCred is not null)
@@ -86,11 +91,22 @@ public sealed class L402HttpClient : IDisposable
         if (challenge is null)
             return response; // 402 but not L402/MPP — return as-is
 
+        // An expired modern challenge cannot produce a credential the server
+        // must accept — refuse before any funds move.
+        if (challenge is ModernPaymentChallenge expiredCheck && expiredCheck.IsExpired)
+            throw new ChallengeExpiredException(expiredCheck.Expires);
+
         // Extract amount and check budget. Prefer the BOLT11-encoded amount, but
         // only when it is strictly positive (PositiveSatsOrNull guards the literal-
-        // zero blank cheque); otherwise fall back to the MPP amount parameter.
+        // zero blank cheque); otherwise fall back to the challenge's amount
+        // parameter (legacy MPP header param, or the modern decoded request amount).
         var amountSats = PositiveSatsOrNull(Bolt11Invoice.ExtractAmountSats(challenge.Invoice))
-            ?? (challenge is MppChallenge mppForBudget ? MppAmountToSats(mppForBudget.Amount) : null);
+            ?? MppAmountToSats(challenge switch
+            {
+                MppChallenge mppForBudget => mppForBudget.Amount,
+                ModernPaymentChallenge modernForBudget => modernForBudget.Amount,
+                _ => null,
+            });
         var domain = uri.Host;
 
         // Macaroon from the parsed challenge, recorded at payment time so two-step
@@ -155,22 +171,35 @@ public sealed class L402HttpClient : IDisposable
         // to the committed amount here.
         if (reservationId.HasValue)
             _budget?.Commit(reservationId.Value, amountSats.Value);
-        SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
+        var record = SpendingLog.Record(domain, uri.AbsolutePath, amountSats.Value, preimage, success: true, macaroon: challengeMacaroon);
 
-        // Cache the credential and use the returned credential directly for the retry header.
-        // This avoids a second cache lookup that could fail if the cache evicts immediately.
-        L402Credential credential;
-        if (challenge is L402Challenge l402Cached)
-            credential = _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage);
+        // Build the retry Authorization header. Modern draft-00 credentials are
+        // SINGLE-USE server-side, so they are never cached; L402 and legacy MPP
+        // credentials keep their cache-and-reuse behavior (using the Put return
+        // value directly avoids a second cache lookup that could fail if the
+        // cache evicts immediately).
+        string authorizationValue;
+        if (challenge is ModernPaymentChallenge modernChallenge)
+            authorizationValue = modernChallenge.BuildAuthorizationHeader(preimage);
+        else if (challenge is L402Challenge l402Cached)
+            authorizationValue = _cache.Put(domain, uri.AbsolutePath, l402Cached.Macaroon, preimage).AuthorizationHeader;
         else
-            credential = _cache.PutMpp(domain, uri.AbsolutePath, preimage);
+            authorizationValue = _cache.PutMpp(domain, uri.AbsolutePath, preimage).AuthorizationHeader;
 
-        // Retry with authorization header constructed directly from the credential
+        // Retry with the freshly built authorization header
         var retryRequest = await CloneRequestAsync(request);
         retryRequest.Headers.Remove("Authorization");
-        retryRequest.Headers.TryAddWithoutValidation("Authorization", credential.AuthorizationHeader);
+        retryRequest.Headers.TryAddWithoutValidation("Authorization", authorizationValue);
 
-        return await _httpClient.SendAsync(retryRequest, ct);
+        var paidResponse = await _httpClient.SendAsync(retryRequest, ct);
+
+        // Surface the server's Payment-Receipt (draft-00) when present. Tolerant:
+        // an absent or malformed receipt never fails the successful payment.
+        var receipt = PaymentReceipt.TryParse(paidResponse);
+        if (receipt is not null)
+            SpendingLog.AttachReceipt(record, receipt);
+
+        return paidResponse;
     }
 
     /// <summary>Send a GET request, auto-paying L402 challenges.</summary>
