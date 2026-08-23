@@ -77,6 +77,29 @@ public class ChallengeParseException : L402Exception
 }
 
 /// <summary>
+/// The modern draft-00 Payment challenge has already expired.
+/// Raised <em>before</em> the payment is attempted.
+/// </summary>
+/// <remarks>
+/// Paying an expired challenge would spend funds for a credential the server is
+/// entitled to reject. Like <see cref="InvoiceExpiredException"/> this is a
+/// precondition failure: no funds are spent.
+/// </remarks>
+public class ChallengeExpiredException : L402Exception
+{
+    /// <summary>The challenge's expires param, as received.</summary>
+    public string? ExpiresAt { get; }
+
+    public ChallengeExpiredException(string? expiresAt = null)
+        : base("Payment challenge has expired" +
+               (expiresAt is null ? "" : $" (expires={expiresAt})") +
+               "; refusing to pay. Request the resource again for a fresh challenge.")
+    {
+        ExpiresAt = expiresAt;
+    }
+}
+
+/// <summary>
 /// No wallet configured or auto-detected.
 /// </summary>
 public class NoWalletException : L402Exception

@@ -71,15 +71,24 @@ public sealed record L402Challenge(string Macaroon, string Invoice) : IPaymentCh
 
     /// <summary>
     /// Tries to parse the best payment challenge from an HTTP response.
-    /// Prefers L402 when available; falls back to MPP.
+    /// Prefers L402 when available; falls back to Payment challenges, where the
+    /// modern draft-00 profile (request= param) is preferred over the legacy
+    /// profile (bare invoice= param).
     /// </summary>
+    /// <remarks>
+    /// A malformed modern challenge is not silently retried as legacy: the
+    /// legacy parser only matches a header that itself carries an
+    /// <c>invoice=</c> param (the superset case, where the legacy params are an
+    /// intentional fallback).
+    /// </remarks>
     public static IPaymentChallenge? TryParsePaymentChallenge(HttpResponseMessage response)
     {
         if (response.Headers.WwwAuthenticate.Count == 0)
             return null;
 
         IPaymentChallenge? l402 = null;
-        IPaymentChallenge? mpp = null;
+        ModernPaymentChallenge? modern = null;
+        MppChallenge? legacy = null;
 
         foreach (var header in response.Headers.WwwAuthenticate)
         {
@@ -97,11 +106,12 @@ public sealed record L402Challenge(string Macaroon, string Invoice) : IPaymentCh
                 }
             }
 
-            mpp ??= MppChallenge.Parse(headerStr);
+            modern ??= ModernPaymentChallenge.Parse(headerStr);
+            legacy ??= MppChallenge.Parse(headerStr);
         }
 
-        // Prefer L402
-        return l402 ?? mpp;
+        // Prefer L402 (unchanged), then modern draft-00 Payment, then legacy Payment.
+        return l402 ?? (IPaymentChallenge?)modern ?? legacy;
     }
 
     // L402 macaroon="...", invoice="..."

@@ -10,6 +10,8 @@ namespace L402Requests;
 /// payment time. Together with <see cref="Preimage"/> it forms the reusable L402
 /// credential (<c>Authorization: L402 {macaroon}:{preimage}</c>) needed by two-step
 /// pay-then-claim flows. Empty string for MPP challenges (which carry no macaroon).
+/// <see cref="Receipt"/> is the server's Payment-Receipt from the paid retry
+/// response, when one was sent (modern draft-00 servers); it carries no secrets.
 /// </remarks>
 public sealed record PaymentRecord(
     string Domain,
@@ -18,7 +20,8 @@ public sealed record PaymentRecord(
     string Preimage,
     DateTimeOffset Timestamp,
     bool Success,
-    string Macaroon = "");
+    string Macaroon = "",
+    PaymentReceipt? Receipt = null);
 
 /// <summary>
 /// Records all L402 payments for introspection and auditing.
@@ -39,6 +42,21 @@ public sealed class SpendingLog
             _records.Add(record);
         }
         return record;
+    }
+
+    /// <summary>
+    /// Attach a parsed Payment-Receipt to a previously recorded payment.
+    /// The receipt arrives on the paid retry response, after the payment
+    /// itself has been recorded.
+    /// </summary>
+    public void AttachReceipt(PaymentRecord record, PaymentReceipt receipt)
+    {
+        lock (_lock)
+        {
+            var index = _records.IndexOf(record);
+            if (index >= 0)
+                _records[index] = record with { Receipt = receipt };
+        }
     }
 
     /// <summary>
