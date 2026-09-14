@@ -58,6 +58,25 @@ export LND_TLS_CERT_PATH="/path/to/tls.cert"  # optional
 export NWC_CONNECTION_STRING="nostr+walletconnect://pubkey?relay=wss://relay&secret=hex"
 ```
 
+### Looking a payment up by hash (0.11.0+)
+
+If a `PayInvoiceAsync` call ends ambiguously (timeout, dropped connection), LND and NWC wallets can be asked what happened to the payment via `IPaymentLookup`:
+
+```csharp
+if (wallet is IPaymentLookup lookup)
+{
+    var r = await lookup.LookupPaymentAsync(paymentHashHex); // 64 lowercase hex chars
+    switch (r.Status)
+    {
+        case PaymentLookupStatus.Paid:    /* r.PreimageHex verified against the hash, r.AmountSats */ break;
+        case PaymentLookupStatus.NotPaid: /* definitive: never attempted or failed */ break;
+        case PaymentLookupStatus.Unknown: /* transport/auth error, in-flight, or wallet can't look up */ break;
+    }
+}
+```
+
+The lookup never throws for wallet-side outcomes. Strike implements the interface but always answers `Unknown` — its public API has no outgoing-payment lookup by Lightning payment hash.
+
 ### OpenNode (not usable for L402)
 
 OpenNode does not return payment preimages, and L402 needs the preimage to build the `Authorization` header — so an OpenNode payment settles and still buys no access.

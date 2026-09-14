@@ -8,7 +8,7 @@ namespace L402Requests.Wallets;
 /// Requires: STRIKE_API_KEY environment variable.
 /// Strike provides full preimage support and requires no infrastructure.
 /// </summary>
-public sealed class StrikeWallet : IWallet, IDisposable
+public sealed class StrikeWallet : IWallet, IPaymentLookup, IDisposable
 {
     private const string DefaultBaseUrl = "https://api.strike.me";
     private readonly HttpClient _httpClient;
@@ -148,6 +148,22 @@ public sealed class StrikeWallet : IWallet, IDisposable
             // Ignore — best-effort preimage fetch
         }
         return null;
+    }
+
+    /// <summary>
+    /// Strike's public API cannot look an OUTGOING Lightning payment up by payment hash: the only
+    /// retrieval endpoint is <c>GET /v1/payments/{paymentId}</c>, keyed by Strike's own payment id that
+    /// is minted at execute time (see docs.strike.me, "Sending payments"). The <c>paymentHash</c> filter
+    /// Strike offers exists only on receive requests (incoming). Without a hash→paymentId mapping there
+    /// is nothing to query, so this adapter honestly answers <see cref="PaymentLookupStatus.Unknown"/>
+    /// rather than guessing. It still validates the hash so callers get the same contract across wallets.
+    /// If Strike ever adds a hash filter on <c>/v1/payments</c>, implement it here (one call, verify
+    /// <c>lightning.preImage</c> opens the hash, map <c>state</c> COMPLETED→Paid / FAILED→NotPaid).
+    /// </summary>
+    public Task<PaymentLookupResult> LookupPaymentAsync(string paymentHash, CancellationToken ct = default)
+    {
+        PaymentLookupSupport.EnsureValidPaymentHash(paymentHash);
+        return Task.FromResult(PaymentLookupResult.Unknown);
     }
 
     public void Dispose()

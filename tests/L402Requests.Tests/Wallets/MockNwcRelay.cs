@@ -63,6 +63,15 @@ internal sealed class MockNwcRelay : IAsyncDisposable
     /// </summary>
     public bool RequireNip44 { get; set; }
 
+    /// <summary>
+    /// When set, a decrypted <c>lookup_invoice</c> request is answered with this raw NIP-47 reply JSON
+    /// (e.g. <c>{"result_type":"lookup_invoice","result":{...}}</c> or an <c>error</c> object). The
+    /// params object the client sent is captured in <see cref="LastLookupParams"/>.
+    /// </summary>
+    public string? LookupResponsePayload { get; set; }
+
+    public JsonObject? LastLookupParams { get; private set; }
+
     public MockNwcRelay(ECPrivKey walletPriv, string walletPubkeyHex, string preimageHex)
     {
         _walletPriv = walletPriv;
@@ -185,22 +194,33 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                     // we still reply so the (wrong-pubkey, validly-signed) response
                     // reaches and is rejected by the client's F-11 gate, rather than
                     // silently producing no reply.
+                    var isLookup = false;
                     try
                     {
                         var decryptedReq = NwcWallet.DecryptContent(encryptedReq, clientPubBytes, _walletPriv);
                         using var reqDoc = JsonDocument.Parse(decryptedReq);
                         var method = reqDoc.RootElement.GetProperty("method").GetString();
-                        if (method != "pay_invoice") continue;
+                        if (method == "lookup_invoice")
+                        {
+                            isLookup = true;
+                            LastLookupParams = JsonNode.Parse(reqDoc.RootElement.GetProperty("params").GetRawText())?.AsObject();
+                        }
+                        else if (method != "pay_invoice") continue;
                     }
                     catch
                     {
                         // Decryption failed (forged-relay scenario) — reply anyway.
                     }
 
+                    if (isLookup && LookupResponsePayload is null)
+                        continue; // wallet that does not implement lookup_invoice: no reply (client times out)
+
                     // Build the response payload and reply as a signed kind-23195 event.
                     // When MalformedJsonPayload is set, send content that decrypts cleanly
                     // but is NOT valid JSON, exercising the client's JsonException handling.
-                    var responsePayload = MalformedJsonPayload
+                    var responsePayload = isLookup
+                        ? LookupResponsePayload!
+                        : MalformedJsonPayload
                         ? "this is not valid json {{{"
                         : new JsonObject
                         {
