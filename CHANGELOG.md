@@ -15,7 +15,7 @@ if (wallet is IPaymentLookup lookup)
 Contract: the call **never throws for wallet-side outcomes** (transport, auth, timeout, parse errors all answer `Unknown`); `Paid` requires the wallet to report a settled **outgoing** payment for that exact hash, and any preimage it returns must hash to the requested payment hash (a mismatch is `Unknown`, not proof); `NotPaid` is reserved for a definitive not-found / failed verdict. The payment hash must be 64 lowercase hex characters — anything else is an `ArgumentException` before any network call.
 
 - **LND:** one call to `GET /v2/router/track/{payment_hash}`; reads the first streamed state only (`SUCCEEDED` → Paid, `FAILED` / gRPC `NotFound` → NotPaid, `IN_FLIGHT` → Unknown without waiting).
-- **NWC:** NIP-47 `lookup_invoice` with `payment_hash`; maps `preimage` / `state` / `settled_at`; `NOT_FOUND` → NotPaid; an `incoming` transaction never counts as Paid.
+- **NWC:** NIP-47 `lookup_invoice` with `payment_hash`; maps `preimage` / `state` / `settled_at`; `NOT_FOUND` → NotPaid; Paid requires `type: "outgoing"` — an `incoming`, missing, or unrecognised `type` is Unknown.
 - **Strike:** always `Unknown`. Strike's public API can retrieve a payment only by its own `paymentId` (`GET /v1/payments/{paymentId}`) — there is no lookup by Lightning payment hash for outgoing payments — so the adapter says so instead of guessing.
 - **OpenNode:** not implemented (no preimage support).
 

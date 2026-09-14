@@ -371,6 +371,10 @@ public class NwcWalletLookupTests
 
     [Theory]
     [InlineData("""{"result":{"type":"incoming","preimage":"__P__","state":"settled"}}""", PaymentLookupStatus.Unknown)]
+    [InlineData("""{"result":{"preimage":"__P__","state":"settled"}}""", PaymentLookupStatus.Unknown)]
+    [InlineData("""{"result":{"type":"weird","preimage":"__P__","state":"settled"}}""", PaymentLookupStatus.Unknown)]
+    [InlineData("""{"result":{"type":"outgoing","preimage":"__P__"}}""", PaymentLookupStatus.Paid)]
+    [InlineData("""{"result":{"type":"OUTGOING","preimage":"__P__"}}""", PaymentLookupStatus.Paid)]
     [InlineData("""{"result":{"type":"outgoing","state":"pending"}}""", PaymentLookupStatus.Unknown)]
     [InlineData("""{"result":{"type":"outgoing","state":"failed"}}""", PaymentLookupStatus.NotPaid)]
     [InlineData("""{"result":{"type":"outgoing","state":"settled"}}""", PaymentLookupStatus.Paid)]

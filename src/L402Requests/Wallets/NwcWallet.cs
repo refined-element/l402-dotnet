@@ -300,13 +300,7 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
             ? await ResolveAutoEncryptionAsync(ct)
             : _encryption;
 
-        var requestContent = new JsonObject
-        {
-            ["method"] = "pay_invoice",
-            ["params"] = new JsonObject { ["invoice"] = bolt11 }
-        }.ToJsonString(NostrJsonOptions);
-
-        using var resultDoc = await SendRequestAsync(requestContent, effectiveEncryption, ct).ConfigureAwait(false);
+        using var resultDoc = await SendRequestAsync(BuildPayInvoiceContent(bolt11), effectiveEncryption, ct).ConfigureAwait(false);
         if (resultDoc is null)
         {
             // Connect succeeded but the wallet never sent a matching reply within the timeout.
@@ -343,7 +337,7 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
     /// Paid when the wallet reports the payment as settled (<c>preimage</c> present and opening the hash, or
     /// <c>state</c>/<c>settled_at</c> settled) for an OUTGOING transaction; a NIP-47 <c>NOT_FOUND</c> error or
     /// <c>state: "failed"</c> is definitive NotPaid; a preimage that does not open the hash, an incoming
-    /// invoice, a pending state, a timeout, relay/transport failure, or any other error → Unknown.
+    /// invoice (or a reply with no / an unrecognised <c>type</c>), a pending state, a timeout, relay/transport failure, or any other error → Unknown.
     /// Never throws for wallet-side outcomes.
     /// </summary>
     public async Task<PaymentLookupResult> LookupPaymentAsync(string paymentHash, CancellationToken ct = default)
@@ -392,13 +386,14 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
         if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
             return PaymentLookupResult.Unknown;
 
-        // The reply must describe THIS payment, and an outgoing one (an incoming invoice with the same
-        // hash would be our own receivable, not proof that we paid anyone).
+        // The reply must describe THIS payment, and an OUTGOING one (an incoming invoice with the same
+        // hash would be our own receivable, not proof that we paid anyone). Fail closed: a reply that
+        // omits "type" or carries an unrecognised one is never Paid.
         var reportedHash = result.TryGetProperty("payment_hash", out var ph) && ph.ValueKind == JsonValueKind.String ? ph.GetString() : null;
         if (!string.IsNullOrEmpty(reportedHash) && !string.Equals(reportedHash, paymentHash, StringComparison.OrdinalIgnoreCase))
             return PaymentLookupResult.Unknown;
         var type = result.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
-        if (!string.IsNullOrEmpty(type) && !string.Equals(type, "outgoing", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(type, "outgoing", StringComparison.OrdinalIgnoreCase))
             return PaymentLookupResult.Unknown;
 
         var state = result.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString()?.ToLowerInvariant() : null;
@@ -587,11 +582,14 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
     /// </list>
     /// </summary>
     private (JsonObject Event, long CreatedAt) BuildPayInvoiceRequest(string bolt11, string encryption)
-        => BuildRequestEvent(new JsonObject
-        {
-            ["method"] = "pay_invoice",
-            ["params"] = new JsonObject { ["invoice"] = bolt11 }
-        }.ToJsonString(NostrJsonOptions), encryption);
+        => BuildRequestEvent(BuildPayInvoiceContent(bolt11), encryption);
+
+    /// <summary>The one place the NIP-47 <c>pay_invoice</c> payload is built — shared by the live path and the test seam.</summary>
+    private static string BuildPayInvoiceContent(string bolt11) => new JsonObject
+    {
+        ["method"] = "pay_invoice",
+        ["params"] = new JsonObject { ["invoice"] = bolt11 }
+    }.ToJsonString(NostrJsonOptions);
 
     /// <summary>Signs and encrypts an arbitrary NIP-47 request payload as a kind-23194 event.</summary>
     private (JsonObject Event, long CreatedAt) BuildRequestEvent(string requestContent, string encryption)
