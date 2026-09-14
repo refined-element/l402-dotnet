@@ -10,7 +10,7 @@ namespace L402Requests.Wallets;
 /// Pay invoices via LND REST API.
 /// Requires: LND_REST_HOST, LND_MACAROON_HEX environment variables.
 /// </summary>
-public sealed class LndWallet : IWallet, IDisposable
+public sealed class LndWallet : IWallet, IPaymentLookup, IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
@@ -228,6 +228,115 @@ public sealed class LndWallet : IWallet, IDisposable
         {
             throw new PaymentFailedException($"LND unexpected status: {status}", bolt11);
         }
+    }
+
+    /// <summary>
+    /// Look an outgoing payment up by hash via <c>GET /v2/router/track/{payment_hash}</c> (one call).
+    /// The router streams the CURRENT state first, so only the first JSON line is read; an
+    /// <c>IN_FLIGHT</c> payment answers <see cref="PaymentLookupStatus.Unknown"/> without waiting for it to
+    /// settle. gRPC <c>NotFound</c> (code 5, "payment isn't initiated") is definitive: this node never
+    /// attempted the payment → <see cref="PaymentLookupStatus.NotPaid"/>; <c>FAILED</c> → NotPaid;
+    /// <c>SUCCEEDED</c> with a preimage that opens the hash → Paid. Everything else (transport, auth,
+    /// parse errors, a preimage that does not match) → Unknown. Never throws for wallet-side outcomes.
+    /// </summary>
+    public async Task<PaymentLookupResult> LookupPaymentAsync(string paymentHash, CancellationToken ct = default)
+    {
+        PaymentLookupSupport.EnsureValidPaymentHash(paymentHash);
+
+        // LND REST encodes bytes path params as URL-safe base64.
+        var hashB64Url = Convert.ToBase64String(Convert.FromHexString(paymentHash)).Replace('+', '-').Replace('/', '_');
+
+        try
+        {
+            using var response = await _httpClient.GetAsync(
+                $"/v2/router/track/{hashB64Url}?no_inflight_updates=false",
+                HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+
+            // The gateway may report NotFound as an HTTP error or as an error line on a 200 stream.
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var reader = new StreamReader(stream);
+            string? line;
+            while ((line = await reader.ReadLineAsync(ct).ConfigureAwait(false)) is not null)
+            {
+                line = line.Trim();
+                if (line.Length == 0) continue;
+                return ClassifyTrackLine(line, paymentHash, response.IsSuccessStatusCode);
+            }
+            return PaymentLookupResult.Unknown;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or JsonException or FormatException)
+        {
+            return PaymentLookupResult.Unknown;
+        }
+    }
+
+    internal static PaymentLookupResult ClassifyTrackLine(string line, string paymentHash, bool httpSuccess)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(line); }
+        catch (JsonException) { return PaymentLookupResult.Unknown; }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return PaymentLookupResult.Unknown;
+
+            // gRPC-gateway error shape: {"code": 5, "message": "...", "error": "..."} (code 5 = NotFound).
+            if (root.TryGetProperty("code", out var codeEl) && codeEl.ValueKind == JsonValueKind.Number
+                && !root.TryGetProperty("result", out _))
+            {
+                return codeEl.TryGetInt32(out var code) && code == 5 ? PaymentLookupResult.NotPaid : PaymentLookupResult.Unknown;
+            }
+            if (!httpSuccess) return PaymentLookupResult.Unknown;
+
+            var result = root.TryGetProperty("result", out var r) ? r : root;
+            if (result.ValueKind != JsonValueKind.Object) return PaymentLookupResult.Unknown;
+
+            // The reply must be about THIS payment.
+            var reportedHash = result.TryGetProperty("payment_hash", out var ph) ? ph.GetString() : null;
+            if (!string.IsNullOrEmpty(reportedHash)
+                && !string.Equals(reportedHash, paymentHash, StringComparison.OrdinalIgnoreCase))
+                return PaymentLookupResult.Unknown;
+
+            var status = result.TryGetProperty("status", out var s) ? s.GetString() ?? "" : "";
+            switch (status)
+            {
+                case "SUCCEEDED":
+                {
+                    var preimage = NormalizePreimageHex(result.TryGetProperty("payment_preimage", out var pi) ? pi.GetString() : null);
+                    if (!PaymentLookupSupport.PreimageOpensHash(preimage, paymentHash))
+                        return PaymentLookupResult.Unknown; // settled-but-unprovable is not proof for this hash
+                    long? amount = null;
+                    if (result.TryGetProperty("value_sat", out var v))
+                    {
+                        if (v.ValueKind == JsonValueKind.String && long.TryParse(v.GetString(), out var parsed)) amount = parsed;
+                        else if (v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var num)) amount = num;
+                    }
+                    return PaymentLookupResult.Paid(preimage, amount);
+                }
+                case "FAILED":
+                    return PaymentLookupResult.NotPaid;
+                default:
+                    return PaymentLookupResult.Unknown; // IN_FLIGHT, INITIATED, UNKNOWN
+            }
+        }
+    }
+
+    /// <summary>LND returns the preimage as hex on lnrpc.Payment but base64 on some older paths; normalize to lowercase hex.</summary>
+    private static string? NormalizePreimageHex(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return null;
+        if (raw.Length == 64)
+        {
+            try { Convert.FromHexString(raw); return raw.ToLowerInvariant(); }
+            catch (FormatException) { }
+        }
+        try { return Convert.ToHexString(Convert.FromBase64String(raw)).ToLowerInvariant(); }
+        catch (FormatException) { return null; }
     }
 
     public void Dispose()

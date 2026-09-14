@@ -73,7 +73,7 @@ public static class NwcEncryption
 /// auto-detected (<c>?iv=</c> ⇒ NIP-04, otherwise NIP-44 v2) regardless of this setting.
 /// </para>
 /// </summary>
-public sealed class NwcWallet : IWallet, IDisposable
+public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
 {
     // Relaxed JSON escaping for the canonical Nostr serialisation. The default
     // System.Text.Json encoder escapes HTML-sensitive and non-ASCII characters (such as
@@ -300,8 +300,138 @@ public sealed class NwcWallet : IWallet, IDisposable
             ? await ResolveAutoEncryptionAsync(ct)
             : _encryption;
 
-        // Build the signed, encrypted pay_invoice request event using the resolved scheme.
-        var (nostrEvent, createdAt) = BuildPayInvoiceRequest(bolt11, effectiveEncryption);
+        var requestContent = new JsonObject
+        {
+            ["method"] = "pay_invoice",
+            ["params"] = new JsonObject { ["invoice"] = bolt11 }
+        }.ToJsonString(NostrJsonOptions);
+
+        using var resultDoc = await SendRequestAsync(requestContent, effectiveEncryption, ct).ConfigureAwait(false);
+        if (resultDoc is null)
+        {
+            // Connect succeeded but the wallet never sent a matching reply within the timeout.
+            // The most common cause is an encryption mismatch — Alby Hub silently drops NIP-04;
+            // Primal/CoinOS silently drop NIP-44 v2 — so name the scheme we used and the swap hint.
+            throw new PaymentFailedException(BuildTimeoutMessage(effectiveEncryption), bolt11);
+        }
+
+        var root = resultDoc.RootElement;
+
+        if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+        {
+            var code = error.TryGetProperty("code", out var c) ? c.ToString() : "unknown";
+            var errorMsg = error.TryGetProperty("message", out var m) ? m.GetString() ?? "unknown error" : "unknown error";
+            throw new PaymentFailedException($"NWC error {code}: {errorMsg}", bolt11);
+        }
+
+        if (root.TryGetProperty("result", out var resultObj) &&
+            resultObj.ValueKind == JsonValueKind.Object &&
+            resultObj.TryGetProperty("preimage", out var preimageEl))
+        {
+            var preimage = preimageEl.GetString();
+            if (string.IsNullOrEmpty(preimage))
+                throw new PaymentFailedException("NWC payment succeeded but no preimage returned", bolt11);
+            return preimage;
+        }
+
+        // A verified, decrypted reply that is neither an error nor a result carrying a preimage.
+        throw new PaymentFailedException("NWC reply carried neither a preimage nor an error", bolt11);
+    }
+
+    /// <summary>
+    /// Look an outgoing payment up via NIP-47 <c>lookup_invoice</c> with <c>payment_hash</c> (one request/reply).
+    /// Paid when the wallet reports the payment as settled (<c>preimage</c> present and opening the hash, or
+    /// <c>state</c>/<c>settled_at</c> settled) for an OUTGOING transaction; a NIP-47 <c>NOT_FOUND</c> error or
+    /// <c>state: "failed"</c> is definitive NotPaid; a preimage that does not open the hash, an incoming
+    /// invoice, a pending state, a timeout, relay/transport failure, or any other error → Unknown.
+    /// Never throws for wallet-side outcomes.
+    /// </summary>
+    public async Task<PaymentLookupResult> LookupPaymentAsync(string paymentHash, CancellationToken ct = default)
+    {
+        PaymentLookupSupport.EnsureValidPaymentHash(paymentHash);
+
+        try
+        {
+            var effectiveEncryption = _encryption == NwcEncryption.Auto
+                ? await ResolveAutoEncryptionAsync(ct).ConfigureAwait(false)
+                : _encryption;
+
+            var requestContent = new JsonObject
+            {
+                ["method"] = "lookup_invoice",
+                ["params"] = new JsonObject { ["payment_hash"] = paymentHash }
+            }.ToJsonString(NostrJsonOptions);
+
+            using var doc = await SendRequestAsync(requestContent, effectiveEncryption, ct).ConfigureAwait(false);
+            if (doc is null) return PaymentLookupResult.Unknown; // timed out waiting for a reply
+            return ClassifyLookupReply(doc.RootElement, paymentHash);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Relay unreachable, websocket error, crypto failure: nothing was proven either way.
+            return PaymentLookupResult.Unknown;
+        }
+    }
+
+    internal static PaymentLookupResult ClassifyLookupReply(JsonElement root, string paymentHash)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return PaymentLookupResult.Unknown;
+
+        if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+        {
+            var code = error.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+            return string.Equals(code, "NOT_FOUND", StringComparison.OrdinalIgnoreCase)
+                ? PaymentLookupResult.NotPaid
+                : PaymentLookupResult.Unknown;
+        }
+
+        if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object)
+            return PaymentLookupResult.Unknown;
+
+        // The reply must describe THIS payment, and an outgoing one (an incoming invoice with the same
+        // hash would be our own receivable, not proof that we paid anyone).
+        var reportedHash = result.TryGetProperty("payment_hash", out var ph) && ph.ValueKind == JsonValueKind.String ? ph.GetString() : null;
+        if (!string.IsNullOrEmpty(reportedHash) && !string.Equals(reportedHash, paymentHash, StringComparison.OrdinalIgnoreCase))
+            return PaymentLookupResult.Unknown;
+        var type = result.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+        if (!string.IsNullOrEmpty(type) && !string.Equals(type, "outgoing", StringComparison.OrdinalIgnoreCase))
+            return PaymentLookupResult.Unknown;
+
+        var state = result.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString()?.ToLowerInvariant() : null;
+        if (state == "failed") return PaymentLookupResult.NotPaid;
+
+        var preimage = result.TryGetProperty("preimage", out var pi) && pi.ValueKind == JsonValueKind.String ? pi.GetString() : null;
+        var settled = state == "settled"
+            || (result.TryGetProperty("settled_at", out var sa) && sa.ValueKind == JsonValueKind.Number && sa.TryGetInt64(out var ts) && ts > 0);
+
+        if (!string.IsNullOrEmpty(preimage))
+        {
+            if (!PaymentLookupSupport.PreimageOpensHash(preimage, paymentHash))
+                return PaymentLookupResult.Unknown; // a preimage that doesn't open the hash proves nothing
+            settled = true;
+        }
+        if (!settled) return PaymentLookupResult.Unknown; // pending / unknown state
+
+        long? amountSats = null;
+        if (result.TryGetProperty("amount", out var amt) && amt.ValueKind == JsonValueKind.Number && amt.TryGetInt64(out var msats))
+            amountSats = msats / 1000; // NIP-47 amounts are millisats
+
+        return PaymentLookupResult.Paid(string.IsNullOrEmpty(preimage) ? null : preimage.ToLowerInvariant(), amountSats);
+    }
+
+    /// <summary>
+    /// Core NIP-47 round trip: sign+encrypt <paramref name="requestContent"/> as a kind-23194 event, connect to
+    /// the first reachable relay, subscribe for our kind-23195 reply, publish, and return the decrypted reply
+    /// JSON (caller disposes). Returns null when no trustworthy matching reply arrived within the timeout.
+    /// Connection failures propagate to the caller.
+    /// </summary>
+    private async Task<JsonDocument?> SendRequestAsync(string requestContent, string effectiveEncryption, CancellationToken ct)
+    {
+        var (nostrEvent, createdAt) = BuildRequestEvent(requestContent, effectiveEncryption);
         var eventId = nostrEvent["id"]!.GetValue<string>();
 
         // Connect to the first reachable relay, failing over across the advertised list.
@@ -325,7 +455,7 @@ public sealed class NwcWallet : IWallet, IDisposable
             };
             await SendTextAsync(ws, subMsg.ToJsonString(NostrJsonOptions), ct);
 
-            // Publish the pay request.
+            // Publish the request.
             var eventMsg = new JsonArray { "EVENT", JsonNode.Parse(nostrEvent.ToJsonString(NostrJsonOptions)) };
             await SendTextAsync(ws, eventMsg.ToJsonString(NostrJsonOptions), ct);
 
@@ -411,51 +541,26 @@ public sealed class NwcWallet : IWallet, IDisposable
                     continue;
                 }
 
-                JsonDocument resultDoc;
                 try
                 {
-                    resultDoc = JsonDocument.Parse(decrypted);
+                    return JsonDocument.Parse(decrypted);
                 }
                 catch (JsonException)
                 {
                     // Decrypted to something that isn't valid JSON — treat as not-for-us and
                     // keep waiting, matching how an undecryptable message is handled above.
-                    // Never let a raw JsonException escape PayInvoiceAsync.
+                    // Never let a raw JsonException escape.
                     continue;
-                }
-                using (resultDoc)
-                {
-                    var root = resultDoc.RootElement;
-
-                    if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
-                    {
-                        var code = error.TryGetProperty("code", out var c) ? c.ToString() : "unknown";
-                        var errorMsg = error.TryGetProperty("message", out var m) ? m.GetString() ?? "unknown error" : "unknown error";
-                        throw new PaymentFailedException($"NWC error {code}: {errorMsg}", bolt11);
-                    }
-
-                    if (root.TryGetProperty("result", out var resultObj) &&
-                        resultObj.ValueKind == JsonValueKind.Object &&
-                        resultObj.TryGetProperty("preimage", out var preimageEl))
-                    {
-                        var preimage = preimageEl.GetString();
-                        if (string.IsNullOrEmpty(preimage))
-                            throw new PaymentFailedException("NWC payment succeeded but no preimage returned", bolt11);
-                        return preimage;
-                    }
                 }
             }
 
-            // Connect succeeded but the wallet never sent a matching reply within the timeout.
-            // The most common cause is an encryption mismatch — Alby Hub silently drops NIP-04;
-            // Primal/CoinOS silently drop NIP-44 v2 — so name the scheme we used and the swap hint.
-            throw new PaymentFailedException(BuildTimeoutMessage(effectiveEncryption), bolt11);
+            return null;
         }
         finally
         {
             // Best-effort close. Use CloseOutputAsync (send-only) with a short bound so a
             // relay that never echoes the close handshake can't hang the call after we
-            // already have the preimage. Fall back to Abort() on any failure.
+            // already have the reply. Fall back to Abort() on any failure.
             if (ws.State == WebSocketState.Open)
             {
                 try
@@ -482,13 +587,15 @@ public sealed class NwcWallet : IWallet, IDisposable
     /// </list>
     /// </summary>
     private (JsonObject Event, long CreatedAt) BuildPayInvoiceRequest(string bolt11, string encryption)
-    {
-        var requestContent = new JsonObject
+        => BuildRequestEvent(new JsonObject
         {
             ["method"] = "pay_invoice",
             ["params"] = new JsonObject { ["invoice"] = bolt11 }
-        }.ToJsonString(NostrJsonOptions);
+        }.ToJsonString(NostrJsonOptions), encryption);
 
+    /// <summary>Signs and encrypts an arbitrary NIP-47 request payload as a kind-23194 event.</summary>
+    private (JsonObject Event, long CreatedAt) BuildRequestEvent(string requestContent, string encryption)
+    {
         var walletPubkeyBytes = Convert.FromHexString(_walletPubkey);
 
         string encryptedContent;
