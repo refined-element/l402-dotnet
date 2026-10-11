@@ -207,6 +207,8 @@ Console.WriteLine($"Share this with the recipient: {claimBody.GetProperty("claim
    - The request is retried with `Authorization: L402 {macaroon}:{preimage}`
 4. Credentials are cached so subsequent requests to the same endpoint don't require re-payment
 
+Every request the library sends, including the paid retry and wallet API calls, carries `User-Agent: L402Requests/<version>`. If you set your own `User-Agent` on the request or on the `HttpClient` you supply, yours is kept, and a supplied `HttpClient` is never modified.
+
 ## Error Handling
 
 ```csharp

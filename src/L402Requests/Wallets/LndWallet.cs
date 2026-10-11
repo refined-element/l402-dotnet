@@ -77,6 +77,7 @@ public sealed class LndWallet : IWallet, IPaymentLookup, IDisposable
             Timeout = TimeSpan.FromSeconds(60),
         };
         _httpClient.DefaultRequestHeaders.Add("Grpc-Metadata-macaroon", macaroonHex);
+        UserAgent.ApplyToOwnedClient(_httpClient);
         _ownsHttpClient = true;
     }
 

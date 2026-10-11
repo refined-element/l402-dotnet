@@ -72,6 +72,9 @@ internal sealed class MockNwcRelay : IAsyncDisposable
 
     public JsonObject? LastLookupParams { get; private set; }
 
+    /// <summary>The <c>User-Agent</c> of the most recent WebSocket upgrade request.</summary>
+    public string? LastUserAgent { get; private set; }
+
     public MockNwcRelay(ECPrivKey walletPriv, string walletPubkeyHex, string preimageHex)
     {
         _walletPriv = walletPriv;
@@ -100,6 +103,8 @@ internal sealed class MockNwcRelay : IAsyncDisposable
                 HttpListenerContext ctx;
                 try { ctx = await _listener.GetContextAsync(); }
                 catch { break; }
+
+                LastUserAgent = ctx.Request.UserAgent;
 
                 if (!ctx.Request.IsWebSocketRequest)
                 {

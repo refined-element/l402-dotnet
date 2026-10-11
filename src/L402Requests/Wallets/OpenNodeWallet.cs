@@ -26,6 +26,7 @@ public sealed class OpenNodeWallet : IWallet, IDisposable
             Timeout = TimeSpan.FromSeconds(60),
         };
         _httpClient.DefaultRequestHeaders.Add("Authorization", apiKey);
+        UserAgent.ApplyToOwnedClient(_httpClient);
         _ownsHttpClient = true;
     }
 

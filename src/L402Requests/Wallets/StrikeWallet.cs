@@ -25,6 +25,7 @@ public sealed class StrikeWallet : IWallet, IPaymentLookup, IDisposable
             Timeout = TimeSpan.FromSeconds(60),
         };
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+        UserAgent.ApplyToOwnedClient(_httpClient);
         _ownsHttpClient = true;
     }
 

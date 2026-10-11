@@ -267,6 +267,7 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
         {
             ct.ThrowIfCancellationRequested();
             var ws = new ClientWebSocket();
+            ws.Options.SetRequestHeader("User-Agent", UserAgent.Value);
             try
             {
                 await ws.ConnectAsync(new Uri(relay), ct).ConfigureAwait(false);
