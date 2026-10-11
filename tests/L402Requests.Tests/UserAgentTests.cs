@@ -17,7 +17,6 @@ public class UserAgentTests
     private const string TestInvoice = "lnbc10u1ptest";
     private const string TestPreimage = "deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567";
     private const string CallerAgent = "caller-agent/9.9";
-    private const string Format = @"^L402Requests/\d+\.\d+\.\d+$";
 
     private static HttpResponseMessage Create402()
     {
@@ -40,27 +39,29 @@ public class UserAgentTests
     private static string? UserAgentOf(HttpRequestMessage request)
         => request.Headers.TryGetValues("User-Agent", out var values) ? string.Join(" ", values) : null;
 
+    // The package version as the assembly carries it, minus any "+commit" suffix.
+    // Prerelease-safe: "0.12.0-beta" stays "0.12.0-beta".
     private static string ExpectedVersion()
-        => typeof(L402HttpClient).Assembly.GetName().Version!.ToString(3);
+    {
+        var informational = typeof(L402HttpClient).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
+        var plus = informational.IndexOf('+');
+        return plus >= 0 ? informational[..plus] : informational;
+    }
 
     // ── Format / version ──
 
     [Fact]
-    public void Value_HasProductTokenAndSemverVersion()
+    public void Value_IsProductTokenSlashPackageVersion()
     {
-        UserAgent.Value.Should().MatchRegex(Format);
         UserAgent.Value.Should().Be($"L402Requests/{ExpectedVersion()}");
+        UserAgent.Value.Should().StartWith("L402Requests/");
     }
 
     [Fact]
     public void Version_MatchesAssemblyInformationalVersionWithoutCommitSuffix()
     {
-        var informational = typeof(L402HttpClient).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
-        var plus = informational.IndexOf('+');
-        var expected = plus >= 0 ? informational[..plus] : informational;
-
-        UserAgent.Version.Should().Be(expected);
+        UserAgent.Version.Should().Be(ExpectedVersion());
         UserAgent.Version.Should().NotContain("+");
     }
 
@@ -68,6 +69,7 @@ public class UserAgentTests
     [InlineData("1.2.3+abcdef0123456789", "1.2.3")]
     [InlineData("1.2.3", "1.2.3")]
     [InlineData(" 1.2.3 ", "1.2.3")]
+    [InlineData("0.12.0-beta+abcdef", "0.12.0-beta")]
     public void ResolveVersion_StripsSourceRevisionSuffix(string informational, string expected)
     {
         UserAgent.ResolveVersion(informational, new Version(9, 9, 9, 0)).Should().Be(expected);
@@ -195,35 +197,52 @@ public class UserAgentTests
     }
 
     // ── Wallet HTTP clients the library constructs (and owns) itself ──
+    // Each wallet's owned-client constructor runs over a mock handler; the outcome of the
+    // call (a 500 here) is irrelevant — only the request that reached the wire is asserted.
 
-    private static string OwnedClientUserAgent(object wallet)
+    private static MockHttpMessageHandler ErroringHandler()
     {
-        var client = (HttpClient)wallet.GetType()
-            .GetField("_httpClient", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(wallet)!;
-        return client.DefaultRequestHeaders.TryGetValues("User-Agent", out var values)
-            ? string.Join(" ", values)
-            : "";
+        var handler = new MockHttpMessageHandler();
+        handler.EnqueueResponse(new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("{}"),
+        });
+        return handler;
     }
 
     [Fact]
-    public void StrikeWallet_OwnedClient_CarriesUserAgent()
+    public async Task StrikeWallet_OwnedClient_SendsUserAgent()
     {
-        using var wallet = new StrikeWallet("fixture-string-strike");
-        OwnedClientUserAgent(wallet).Should().Be(UserAgent.Value);
+        var handler = ErroringHandler();
+        using var wallet = new StrikeWallet("fixture-string-strike", "https://strike.example.com", handler);
+
+        await Record.ExceptionAsync(() => wallet.PayInvoiceAsync(TestInvoice));
+
+        handler.SentRequests.Should().NotBeEmpty();
+        UserAgentOf(handler.SentRequests[0]).Should().Be(UserAgent.Value);
     }
 
     [Fact]
-    public void OpenNodeWallet_OwnedClient_CarriesUserAgent()
+    public async Task OpenNodeWallet_OwnedClient_SendsUserAgent()
     {
-        using var wallet = new OpenNodeWallet("fixture-string-opennode");
-        OwnedClientUserAgent(wallet).Should().Be(UserAgent.Value);
+        var handler = ErroringHandler();
+        using var wallet = new OpenNodeWallet("fixture-string-opennode", "https://opennode.example.com", handler);
+
+        await Record.ExceptionAsync(() => wallet.PayInvoiceAsync(TestInvoice));
+
+        handler.SentRequests.Should().NotBeEmpty();
+        UserAgentOf(handler.SentRequests[0]).Should().Be(UserAgent.Value);
     }
 
     [Fact]
-    public void LndWallet_OwnedClient_CarriesUserAgent()
+    public async Task LndWallet_OwnedClient_SendsUserAgent()
     {
-        using var wallet = new LndWallet("https://127.0.0.1:8080", "0201036c6e64");
-        OwnedClientUserAgent(wallet).Should().Be(UserAgent.Value);
+        var handler = ErroringHandler();
+        using var wallet = new LndWallet("https://lnd.example.com:8080", "0201036c6e64", handler);
+
+        await Record.ExceptionAsync(() => wallet.PayInvoiceAsync(TestInvoice));
+
+        handler.SentRequests.Should().NotBeEmpty();
+        UserAgentOf(handler.SentRequests[0]).Should().Be(UserAgent.Value);
     }
 }

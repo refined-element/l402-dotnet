@@ -19,8 +19,14 @@ public sealed class OpenNodeWallet : IWallet, IDisposable
     public bool SupportsPreimage => false;
 
     public OpenNodeWallet(string apiKey, string? baseUrl = null)
+        : this(apiKey, baseUrl, new HttpClientHandler())
     {
-        _httpClient = new HttpClient
+    }
+
+    /// <summary>Same as the public constructor, over a supplied handler (tests).</summary>
+    internal OpenNodeWallet(string apiKey, string? baseUrl, HttpMessageHandler handler)
+    {
+        _httpClient = new HttpClient(handler)
         {
             BaseAddress = new Uri((baseUrl ?? DefaultBaseUrl).TrimEnd('/')),
             Timeout = TimeSpan.FromSeconds(60),

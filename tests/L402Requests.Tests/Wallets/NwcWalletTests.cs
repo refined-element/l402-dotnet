@@ -590,7 +590,7 @@ public class NwcWalletTests
     }
 
     [Fact]
-    public async Task PayInvoiceAsync_RelayUpgradeRequest_CarriesUserAgent()
+    public async Task PayInvoiceAsync_RelayUpgradeRequest_DoesNotCarryLibraryUserAgent()
     {
         var (walletPriv, walletPub) = GenerateKeyPair();
         var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
@@ -606,7 +606,9 @@ public class NwcWalletTests
 
         await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
 
-        relay.LastUserAgent.Should().Be(UserAgent.Value);
+        // Public relays get no library fingerprint (and SetRequestHeader is unsupported
+        // on browser-wasm), so the WebSocket upgrade is sent without it.
+        (relay.LastUserAgent ?? "").Should().NotContain(UserAgent.ProductToken);
     }
 
     [Fact]
