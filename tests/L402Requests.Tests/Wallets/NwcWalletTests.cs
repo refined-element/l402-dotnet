@@ -590,6 +590,28 @@ public class NwcWalletTests
     }
 
     [Fact]
+    public async Task PayInvoiceAsync_RelayUpgradeRequest_DoesNotCarryLibraryUserAgent()
+    {
+        var (walletPriv, walletPub) = GenerateKeyPair();
+        var walletPubHex = Convert.ToHexString(walletPub).ToLowerInvariant();
+        var preimage = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+
+        await using var relay = new MockNwcRelay(walletPriv, walletPubHex, preimage);
+        await relay.StartAsync();
+
+        var connStr =
+            "nostr+walletconnect://" + walletPubHex +
+            "?relay=" + relay.Url + "&secret=" + ValidClientSecretHex;
+        var wallet = new NwcWallet(connStr, TimeSpan.FromSeconds(10));
+
+        await wallet.PayInvoiceAsync("lnbc100n1p3xyztest");
+
+        // Public relays get no library fingerprint (and SetRequestHeader is unsupported
+        // on browser-wasm), so the WebSocket upgrade is sent without it.
+        (relay.LastUserAgent ?? "").Should().NotContain(UserAgent.ProductToken);
+    }
+
+    [Fact]
     public async Task PayInvoiceAsync_Nip44OnlyWallet_AutoDetectsNip44_AndPays()
     {
         // THE BUG FIX. The wallet only understands NIP-44 v2 (Alby Hub): it silently

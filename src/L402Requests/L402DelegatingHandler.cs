@@ -39,6 +39,12 @@ public sealed class L402DelegatingHandler : DelegatingHandler
     {
         var uri = request.RequestUri ?? throw new ArgumentException("Request must have a URI");
 
+        // Identify the library unless the caller already set a User-Agent. HttpClient has
+        // merged its DefaultRequestHeaders into the request before any handler runs, so a
+        // client-level User-Agent is already visible here. The paid retry is cloned from
+        // this request and inherits the header.
+        UserAgent.ApplyIfAbsent(request);
+
         // Advertise draft-00 Payment support (optional per the spec; servers
         // that don't know the header ignore it).
         if (!request.Headers.Contains("Accept-Payment"))

@@ -36,6 +36,24 @@ public sealed class LndWallet : IWallet, IPaymentLookup, IDisposable
     /// (including the macaroon). Prefer <paramref name="tlsCertPath"/> instead.
     /// </param>
     public LndWallet(string host, string macaroonHex, string? tlsCertPath = null, bool insecure = false)
+        : this(host, macaroonHex, CreateHandler(tlsCertPath, insecure))
+    {
+    }
+
+    /// <summary>Same as the public constructor, over a supplied handler (tests).</summary>
+    internal LndWallet(string host, string macaroonHex, HttpMessageHandler handler)
+    {
+        _httpClient = new HttpClient(handler)
+        {
+            BaseAddress = new Uri(host.TrimEnd('/')),
+            Timeout = TimeSpan.FromSeconds(60),
+        };
+        _httpClient.DefaultRequestHeaders.Add("Grpc-Metadata-macaroon", macaroonHex);
+        UserAgent.ApplyToOwnedClient(_httpClient);
+        _ownsHttpClient = true;
+    }
+
+    private static HttpClientHandler CreateHandler(string? tlsCertPath, bool insecure)
     {
         var handler = new HttpClientHandler();
 
@@ -71,13 +89,7 @@ public sealed class LndWallet : IWallet, IPaymentLookup, IDisposable
                     ValidateServerCertificate(capturedPin, insecureOptIn, serverCert, chain, errors);
         }
 
-        _httpClient = new HttpClient(handler)
-        {
-            BaseAddress = new Uri(host.TrimEnd('/')),
-            Timeout = TimeSpan.FromSeconds(60),
-        };
-        _httpClient.DefaultRequestHeaders.Add("Grpc-Metadata-macaroon", macaroonHex);
-        _ownsHttpClient = true;
+        return handler;
     }
 
     private static bool IsInsecureEnvOptIn()

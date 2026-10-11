@@ -71,6 +71,11 @@ public sealed class L402HttpClient : IDisposable
         var url = request.RequestUri?.ToString() ?? throw new ArgumentException("Request must have a URI");
         var uri = request.RequestUri!;
 
+        // Identify the library unless the caller already set a User-Agent (on the request
+        // or on the HttpClient they supplied). Per request, so that client is never mutated;
+        // the paid retry below is cloned from this request and inherits the header.
+        UserAgent.ApplyIfAbsent(request, _httpClient.DefaultRequestHeaders);
+
         // Advertise draft-00 Payment support (optional per the spec; servers
         // that don't know the header ignore it).
         if (!request.Headers.Contains("Accept-Payment"))

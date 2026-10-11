@@ -266,6 +266,9 @@ public sealed class NwcWallet : IWallet, IPaymentLookup, IDisposable
         foreach (var relay in relays)
         {
             ct.ThrowIfCancellationRequested();
+            // Deliberately no library User-Agent here: relays are public third-party
+            // infrastructure (no attribution value, fingerprinting cost), and
+            // ClientWebSocketOptions.SetRequestHeader throws on browser-wasm.
             var ws = new ClientWebSocket();
             try
             {

@@ -18,13 +18,20 @@ public sealed class StrikeWallet : IWallet, IPaymentLookup, IDisposable
     public bool SupportsPreimage => true;
 
     public StrikeWallet(string apiKey, string? baseUrl = null)
+        : this(apiKey, baseUrl, new HttpClientHandler())
     {
-        _httpClient = new HttpClient
+    }
+
+    /// <summary>Same as the public constructor, over a supplied handler (tests).</summary>
+    internal StrikeWallet(string apiKey, string? baseUrl, HttpMessageHandler handler)
+    {
+        _httpClient = new HttpClient(handler)
         {
             BaseAddress = new Uri((baseUrl ?? DefaultBaseUrl).TrimEnd('/')),
             Timeout = TimeSpan.FromSeconds(60),
         };
         _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+        UserAgent.ApplyToOwnedClient(_httpClient);
         _ownsHttpClient = true;
     }
 

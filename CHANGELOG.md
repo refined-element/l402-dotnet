@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Versioned `User-Agent` on every request.** Every HTTP request the library issues now carries `User-Agent: L402Requests/<version>`, where the version is the package version (assembly informational version, with any `+commit` suffix stripped). This covers the initial request that receives the 402, the paid retry with `Authorization: L402 …` / `Payment …`, both `L402HttpClient` and `L402DelegatingHandler`, and the Strike / LND / OpenNode wallet API clients the library creates.
+
+- **Caller wins:** a `User-Agent` already set on the request, or on the `HttpClient` passed in (its `DefaultRequestHeaders`), is left as-is.
+- **No mutation:** the header is added per request, never to a caller-supplied `HttpClient`.
+- **Not on NWC:** the NWC relay WebSocket connection does not carry it. Relays are public third-party infrastructure, so the header would only add a fingerprint (same stance as the Python package), and `ClientWebSocketOptions.SetRequestHeader` is unsupported on browser-wasm.
+
 ## 0.11.0
 
 **Payment lookup by hash (`IPaymentLookup`).** A wallet call that times out or loses its connection can land *after* the payment was submitted, leaving the caller unsure whether sats moved. The new optional wallet capability lets a caller ask the same wallet what happened, keyed by the BOLT11 payment hash:
