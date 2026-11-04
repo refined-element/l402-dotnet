@@ -9,6 +9,9 @@ on:
 jobs:
   build-test-publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # NuGet.org Trusted Publishing (OIDC); no stored API key
     steps:
       - uses: actions/checkout@v4
 
@@ -46,9 +49,19 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: dotnet pack src/L402Requests/L402Requests.csproj --configuration Release --no-build --output ./nupkg
 
+      # Exchanges GitHub's OIDC token for a short-lived NuGet key against the Trusted
+      # Publishing policy on nuget.org (profile LightningEnable, owner refined-element,
+      # repo l402-dotnet, workflow publish-nuget.yml). `user` is the profile name, not a secret.
+      - name: NuGet login (OIDC -> temporary API key)
+        if: steps.check.outputs.exists == 'false'
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: LightningEnable
+
       - name: Push to NuGet
         if: steps.check.outputs.exists == 'false'
-        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Summary
         run: |
